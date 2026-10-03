@@ -4,6 +4,7 @@
 Reads the newest transcript in ~/.claude/projects (no model calls, no usage).
 Drag to move. Right-click for options. Launching it again while it runs closes it.
 """
+import collections
 import colorsys
 import ctypes
 import glob
@@ -15,6 +16,7 @@ import subprocess
 import sys
 import time
 import tkinter as tk
+from datetime import datetime
 
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
@@ -374,6 +376,82 @@ class Scene:
 
 
 # ---------- session data ----------
+def parse_ts(ts):
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+    except (AttributeError, ValueError):
+        return None
+
+
+class Stats:
+    """Running totals for one session, fed one transcript entry at a time."""
+    EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
+
+    def __init__(self):
+        self.usage = {}  # message id -> usage (a message's content blocks share one id and usage)
+        self.tool_ids = set()
+        self.tools = collections.Counter()
+        self.errors = 0
+        self.files = set()
+        self.prompts = 0
+        self.last_prompt = None
+        self.subagents = 0
+        self.started = None
+        self._totals = None
+
+    def add(self, d):
+        ts = parse_ts(d.get("timestamp"))
+        if ts and self.started is None:
+            self.started = ts
+        m = d.get("message") or {}
+        content = m.get("content")
+        if d.get("type") == "assistant":
+            if m.get("id") and m.get("usage"):
+                self.usage[m["id"]] = m["usage"]
+                self._totals = None
+            for c in content if isinstance(content, list) else []:
+                if not isinstance(c, dict) or c.get("type") != "tool_use" or c.get("id") in self.tool_ids:
+                    continue
+                self.tool_ids.add(c.get("id"))
+                name = c.get("name") or "?"
+                self.tools[name] += 1
+                if name in ("Agent", "Task"):
+                    self.subagents += 1
+                inp = c.get("input") or {}
+                fp = inp.get("file_path") or inp.get("notebook_path")
+                if fp and name in self.EDIT_TOOLS:
+                    self.files.add(os.path.normcase(fp))
+        elif d.get("type") == "user" and not d.get("isMeta") and not d.get("isCompactSummary"):
+            if isinstance(content, str):
+                texts = [content]
+            else:
+                blocks = [c for c in content or [] if isinstance(c, dict)]
+                self.errors += sum(1 for c in blocks if c.get("type") == "tool_result" and c.get("is_error"))
+                if any(c.get("type") == "tool_result" for c in blocks):
+                    return
+                texts = [c.get("text") or "" for c in blocks if c.get("type") == "text"]
+            # a real prompt has some text that isn't a command echo, caveat or system note
+            if any(t.strip() and not t.lstrip().startswith("<") for t in texts):
+                self.prompts += 1
+                self.last_prompt = ts or self.last_prompt
+
+    @property
+    def totals(self):
+        if self._totals is None:
+            inp = cread = cwrite = out = think = peak = 0
+            for u in self.usage.values():
+                i, r, w = (u.get("input_tokens", 0), u.get("cache_read_input_tokens", 0),
+                           u.get("cache_creation_input_tokens", 0))
+                inp, cread, cwrite = inp + i, cread + r, cwrite + w
+                out += u.get("output_tokens", 0)
+                think += (u.get("output_tokens_details") or {}).get("thinking_tokens", 0)
+                peak = max(peak, i + r + w)
+            total = inp + cread + cwrite
+            self._totals = {"cache": cread / total if total else None, "out": out, "think": think,
+                            "peak": peak, "calls": len(self.usage)}
+        return self._totals
+
+
 class Session:
     def __init__(self, cfg, path=None):
         self.cfg = cfg
@@ -383,6 +461,7 @@ class Session:
         self.seen_cc = None  # compaction / restore counts the window has already reacted to
         self.seen_restores = None
         self.title = None
+        self.stats = Stats()
         self.compactions = 0
         self.last_pre = None
         self.last_duration = None
@@ -418,6 +497,7 @@ class Session:
         if switched:
             self.path, self.offset, self.compactions, self.last_pre = path, 0, 0, None
             self.last_duration, self.restores, self.restored_msg, self.title = None, 0, None, None
+            self.stats = Stats()
             self.cwd, self.tokens, self.jobs, self.git_at = None, None, [], 0
         mtime = os.path.getmtime(path)
         changed = switched or mtime != self.mtime
@@ -456,6 +536,13 @@ class Session:
                     self.last_duration = (meta.get("durationMs") or 0) / 1000 or None
                 except ValueError:
                     pass
+            if b'"type":"assistant"' in raw or b'"type":"user"' in raw:
+                try:
+                    d = json.loads(raw)
+                except ValueError:
+                    d = None
+                if isinstance(d, dict) and not d.get("isSidechain"):
+                    self.stats.add(d)
             if b'"custom-title"' in raw:  # the sidebar title the desktop app saves
                 try:
                     self.title = clean_title(json.loads(raw).get("customTitle"))
@@ -552,6 +639,21 @@ def fmt_k(t):
     return f"{t / 1e6:.2g}M" if t >= 1e6 else f"{round(t / 1000)}k"
 
 
+def fmt_dur(sec):
+    m = int(sec // 60)
+    if m < 1:
+        return "<1m"
+    if m < 60:
+        return f"{m}m"
+    if m < 48 * 60:
+        return f"{m // 60}h {m % 60}m"
+    return f"{m // 1440}d {m % 1440 // 60}h"
+
+
+def fmt_since(sec):
+    return "just now" if sec < 60 else fmt_dur(sec) + " ago"
+
+
 def fmt_ago(sec):
     if sec < 60:
         return "live"
@@ -639,11 +741,15 @@ class Widget:
         self.label.bind("<B1-Motion>", self.drag_move)
         self.label.bind("<ButtonRelease-1>", self.release)
         self.label.bind("<Motion>", self.motion)
-        self.label.bind("<Leave>", lambda e: self.set_hover(None))
+        self.inside = False  # pointer over the widget (zen mode shows its % tag then)
+        self.label.bind("<Enter>", lambda e: self.set_inside(True))
+        self.label.bind("<Leave>", lambda e: self.set_inside(False))
+        self.label.bind("<Double-Button-1>", self.toggle_zen)
         self.label.bind("<Button-3>", self.menu)
         self.topvar = tk.BooleanVar(value=self.cfg["topmost"])
         self.pinvar = tk.BooleanVar(value=bool(self.cfg.get("pinned")))
         self.themevar = tk.StringVar(value=self.cfg["theme"] if self.cfg["theme"] in THEMES else "Moss")
+        self.zenvar = tk.BooleanVar(value=bool(self.cfg.get("zen")))
 
         self.refresh_sessions()
         if len(self.order) > 1:
@@ -1009,7 +1115,10 @@ class Widget:
 
     def draw(self):
         self.hits = []
-        img = self.render_grove() if self.view == "grove" else self.render_focus()
+        if self.cfg.get("zen"):
+            img = self.render_zen()
+        else:
+            img = self.render_grove() if self.view == "grove" else self.render_focus()
         self.last_img = img
         self.frame_img = ImageTk.PhotoImage(img)
         self.label.configure(image=self.frame_img)
@@ -1088,13 +1197,66 @@ class Widget:
         d.text(((W - d.textlength(hint, font=F["small"])) / 2, H - pad - 14 * f), hint, font=F["small"], fill=C["muted"])
         return img
 
+    def render_zen(self):
+        """Just the bonsai: no text, a small tag on hover. A row of trees when several sessions are active."""
+        f, F = self.f, self.fonts
+        m = round(6 * f)
+        if self.view == "grove" and len(self.order) > 1:
+            cell = int(110 * f)
+            if self.grove_scene is None or self.grove_scene.w != cell:
+                self.grove_scene = Scene(cell, GROVE_CROP)
+                self.grove_cache = {}
+            scene, n = self.grove_scene, len(self.order)
+            img = Image.new("RGBA", (2 * m + n * cell + (n - 1) * m, 2 * m + scene.h), C["panel"])
+            d = ImageDraw.Draw(img)
+            for i, p in enumerate(self.order):
+                s = self.sessions[p]
+                key = (round(s.g, 3), s.compactions)
+                cached = self.grove_cache.get(p)
+                if not cached or cached[0] != key:
+                    cached = self.grove_cache[p] = (key, scene.render(s.g, s.compactions, []))
+                x = m + i * (cell + m)
+                img.paste(cached[1], (x, m), cached[1])
+                self.hits.append(((x, m, x + cell, m + scene.h), "open", p))
+                if self.hover_key == ("open", p):
+                    self.tag(d, x + 5 * f, m + 5 * f, f"{round(s.g * 100)}% · {s.title or s.name}", cell - 10 * f)
+        else:
+            tree = self.tree().copy()
+            tree.alpha_composite(self.overlay(tree.size))
+            img = Image.new("RGBA", (tree.width + 2 * m, tree.height + 2 * m), C["panel"])
+            d = ImageDraw.Draw(img)
+            img.paste(tree, (m, m), tree)
+            if self.inside:
+                label = f"{round(self.g * 100)}%"
+                if self.phase in PHASE_TEXT:
+                    label += " · " + PHASE_TEXT[self.phase][0].lower()
+                self.tag(d, m + 6 * f, m + 6 * f, label, tree.width - 12 * f)
+        d.rectangle([0, 0, img.width - 1, img.height - 1], outline=C["line"])
+        return img
+
+    def tag(self, d, x, y, text, maxw):
+        F, f = self.fonts, self.f
+        text = ellipsize(d, text, F["small"], maxw - 14 * f)
+        w = d.textlength(text, font=F["small"]) + 14 * f
+        d.rounded_rectangle([x, y, x + w, y + 20 * f], radius=10 * f, fill=C["panel"], outline=C["line"])
+        d.text((x + 7 * f, y + 3 * f), text, font=F["small"], fill=C["ink"])
+
+    def toggle_zen(self, e=None):
+        if e is not None and not self.cfg.get("zen") and self.hit_at(e.x, e.y):
+            return  # double-clicking a button or tab shouldn't also switch modes
+        self.cfg["zen"] = not self.cfg.get("zen")
+        self.zenvar.set(self.cfg["zen"])
+        save_config(self.cfg)
+        self.hover_key = None
+        self.draw()
+
     def render_focus(self):
         s, f, F, pad = self.session, self.f, self.fonts, self.pad
         now = time.time()
         tree = self.tree().copy()
         tree.alpha_composite(self.overlay(tree.size))
 
-        H = round(pad + 22 * f + 8 * f + tree.height + 12 * f + 40 * f + 14 * f + 34 * f + 56 * f + pad)
+        H = round(pad + 22 * f + 8 * f + tree.height + 12 * f + 40 * f + 14 * f + 34 * f + 108 * f + pad)
         img = Image.new("RGBA", (self.W, H), C["panel"])
         d = ImageDraw.Draw(img)
         d.rectangle([0, 0, self.W - 1, H - 1], outline=C["line"])
@@ -1181,23 +1343,60 @@ class Widget:
             caption, ccol = self.caption[0], self.caption[1]
         d.text((pad, y), ellipsize(d, caption, F["small"], self.W - 2 * pad), font=F["small"], fill=C[ccol])
         y += 26 * f
-        # stats grid
+        # stats: "Now" (current state) and "Session" (totals) tabs
         d.line([(pad, y), (self.W - pad, y)], fill=C["line"], width=max(1, round(f)))
-        y += 8 * f
-        branch, dirty = s.git
-        jobs = len(s.jobs)
-        stats = [
-            ("BRANCH", branch or "–"), ("CHANGED", "–" if dirty is None else str(dirty)),
-            ("JOBS", str(jobs) if jobs else "none"), ("COMPACTS", str(s.compactions)),
-        ]
+        page = self.cfg.get("page", "now")
+        tx = pad
+        for key, text in (("now", "NOW"), ("session", "SESSION")):
+            tw = d.textlength(text, font=F["mono"])
+            active = page == key
+            hovered = self.hover_key == ("page", key)
+            d.text((tx, y + 6 * f), text, font=F["mono"], fill=C["ink"] if active or hovered else C["muted"])
+            if active:
+                d.rectangle([tx, y, tx + tw, y + max(1, round(2 * f))], fill=C[state])
+            self.hits.append(((tx - 4 * f, y, tx + tw + 4 * f, y + 20 * f), "page", key))
+            tx += tw + 16 * f
+        y += 24 * f
+        st, tot = s.stats, s.stats.totals
+        if page == "session":
+            cache = tot["cache"]
+            ccol = "ink" if cache is None or cache >= 0.8 else "warn" if cache >= 0.5 else "crit"
+            calls = sum(st.tools.values())
+            stats = [
+                ("CACHE", "–" if cache is None else f"{cache:.0%}", ccol), ("OUTPUT", fmt_k(tot["out"]), "ink"),
+                ("THINKING", fmt_k(tot["think"]), "ink"), ("TOOLS", str(calls), "ink"),
+                ("ERRORS", str(st.errors), "warn" if calls and st.errors / calls > 0.1 else "ink"),
+                ("FILES", str(len(st.files)), "ink"),
+            ]
+            top = " · ".join(f"{name} {n}" for name, n in st.tools.most_common(3))
+            footer = "Top: " + top if top else "No tool calls yet"
+        else:
+            branch, dirty = s.git
+            jobs = len(s.jobs)
+            stats = [
+                ("BRANCH", branch or "–", "ink"), ("CHANGED", "–" if dirty is None else str(dirty), "ink"),
+                ("JOBS", str(jobs) if jobs else "none", "warn" if jobs else "ink"),
+                ("COMPACTS", str(s.compactions), "ink"),
+                ("PEAK", fmt_k(tot["peak"]) if tot["peak"] else "–", "ink"),
+                ("LAST ASK", fmt_since(now - st.last_prompt) if st.last_prompt else "–", "ink"),
+            ]
+            parts = []
+            if st.started and s.mtime:
+                parts.append(fmt_dur(s.mtime - st.started) + " long")
+            parts.append(f"{st.prompts} prompt" + ("" if st.prompts == 1 else "s"))
+            parts.append(f"{tot['calls']} API calls")
+            if st.subagents:
+                parts.append(f"{st.subagents} subagent" + ("" if st.subagents == 1 else "s"))
+            footer = " · ".join(parts)
         colw = (self.W - 2 * pad) / 2
-        for i, (k, v) in enumerate(stats):
+        for i, (k, v, vc) in enumerate(stats):
             cx = pad + (i % 2) * colw
             cy = y + (i // 2) * 22 * f
             d.text((cx, cy + 2 * f), k, font=F["mono"], fill=C["muted"])
             kw = d.textlength(k, font=F["mono"]) + 6 * f
-            vcol = C["warn"] if (k == "JOBS" and jobs) else C["ink"]
-            d.text((cx + kw, cy - 1 * f), ellipsize(d, v, F["body"], colw - kw - 6 * f), font=F["body"], fill=vcol)
+            d.text((cx + kw, cy - 1 * f), ellipsize(d, v, F["body"], colw - kw - 6 * f), font=F["body"], fill=C[vc])
+        y += 3 * 22 * f + 2 * f
+        d.text((pad, y), ellipsize(d, footer, F["small"], self.W - 2 * pad), font=F["small"], fill=C["muted"])
         return img
 
     def draw_button(self, d, y):
@@ -1258,11 +1457,21 @@ class Widget:
         elif action == "grove":
             self.view = "grove"
             self.follow = True
+        elif action == "page":
+            self.cfg["page"] = arg
+            save_config(self.cfg)
         self.hover_key = None
         self.draw()
 
     def motion(self, e):
         self.set_hover(self.hit_at(e.x, e.y))
+
+    def set_inside(self, on):
+        self.inside = on
+        if not on:
+            self.hover_key = None
+            self.label.configure(cursor="fleur")
+        self.draw()
 
     def set_hover(self, key):
         if key != self.hover_key:
@@ -1278,8 +1487,12 @@ class Widget:
         for name in THEMES:
             themes.add_radiobutton(label=name, value=name, variable=self.themevar, command=self.change_theme)
         m.add_cascade(label="Theme", menu=themes)
+        m.add_checkbutton(label="Zen mode", variable=self.zenvar, command=self.toggle_zen)
         if len(self.order) > 1 and self.view == "focus":
             m.add_command(label="Show grove", command=lambda: self.do("grove", None))
+        if self.view == "focus" and self.phase in ("idle", "armed"):
+            m.add_command(label="Cancel compact" if self.phase == "armed" else "Compact",
+                          command=lambda: self.do("compact", None))
         m.add_separator()
         m.add_command(label="Preview compact animation", command=self.run_preview)
         m.add_command(label="Quit", command=self.root.destroy)

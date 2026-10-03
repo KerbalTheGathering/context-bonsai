@@ -26,10 +26,12 @@ A small always-on-top card for your Claude Code sessions.
 - **The tree** fills out as context grows. Leaves go from calm to alarming colors near the limit and start falling above 90%. Compacting prunes it back and adds a tally mark to the pot.
 - **The readout** shows context % and tokens, a "compact soon" mark at 85%, and the stage with a short tip.
 - **The stats** show the git branch, uncommitted files, running background jobs and the compaction count.
+- **Stats tabs:** *Now* shows branch, uncommitted files, running jobs, compactions, peak context and time since your last prompt, plus session length, prompts and API calls. *Session* shows the cache hit rate, output and thinking tokens, tool calls, tool errors, files edited and the top tools.
+- **Zen mode:** just the bonsai, no text (a row of trees when several sessions are active). Hover for a small % tag; compaction animations still play. Double-click or right-click → Zen mode to switch.
 - **Themes:** Moss, Paper, Sakura, Midnight, Sumi-e (right-click → Theme).
 - **Compact button:** copies `/compact` and brings the Claude app to the front, so you paste it with Ctrl+V and Enter. The widget then animates the compaction: shears snip the canopy while it runs, leaves burst off when it finishes, and rain and new buds play when the rehydrate hook restores state.
 
-Controls: drag to move (the card stays anchored at its bottom-right corner when it changes size). Right-click for Keep on top, Pin this session, Theme, Show grove, Preview compact animation, and Quit. Opening the shortcut (or `bonsai_widget.pyw`) again while it runs closes it.
+Controls: drag to move (the card stays anchored at its bottom-right corner when it changes size). Right-click for Keep on top, Pin this session, Theme, Zen mode, Show grove, Compact, Preview compact animation, and Quit. Opening the shortcut (or `bonsai_widget.pyw`) again while it runs closes it.
 
 Requirements: Python 3 with Tk and Pillow (`pip install pillow`). It assumes a 1M-token context window; change `window` in `~/.claude/widget/bonsai.json` if yours differs.
 
