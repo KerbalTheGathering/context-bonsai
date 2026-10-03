@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Context Bonsai</title>
+<style>
+  :root {
+    --wall: #E6E8E1; --wall-2: #D6DACF; --ink: #1E2420; --muted: #5B645D; --line: #C3C9BD;
+    --pot: #3C6A70; --pot-dark: #2A4D52; --pot-hi: #5E8F94; --wood: #6B4A33; --wood-dark: #4C3423;
+    --soil: #3A2E25; --moss: #6E8A4C; --bark: #4A3A2E; --bark-hi: #6D5643;
+    --ok: #4F7A3A; --warn: #A8701A; --crit: #B0472B; --leaf-light: 0;
+    --body: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+    --mono: "Cascadia Mono", Consolas, ui-monospace, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --wall: #151A19; --wall-2: #1D2422; --ink: #E3E7E0; --muted: #9AA39B; --line: #2F3835;
+      --pot: #4E8990; --pot-dark: #33616A; --pot-hi: #78AEB4; --wood: #7A5A40; --wood-dark: #59402D;
+      --soil: #2A221C; --moss: #5E7A40; --bark: #7A6552; --bark-hi: #9C8469;
+      --ok: #8DBA6E; --warn: #E0A94A; --crit: #E7795A; --leaf-light: 7;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --wall: #151A19; --wall-2: #1D2422; --ink: #E3E7E0; --muted: #9AA39B; --line: #2F3835;
+    --pot: #4E8990; --pot-dark: #33616A; --pot-hi: #78AEB4; --wood: #7A5A40; --wood-dark: #59402D;
+    --soil: #2A221C; --moss: #5E7A40; --bark: #7A6552; --bark-hi: #9C8469;
+    --ok: #8DBA6E; --warn: #E0A94A; --crit: #E7795A; --leaf-light: 7;
+  }
+  body { margin: 0; background: var(--wall); color: var(--ink); font-family: var(--body); font-size: 14px; line-height: 1.5; }
+  .wrap { max-width: 560px; margin: 0 auto; padding: 20px 16px 28px; display: grid; gap: 16px; }
+  header { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+  h1 { font-size: 1.15rem; font-weight: 600; margin: 0; overflow-wrap: anywhere; }
+  .when { font-family: var(--mono); font-size: 11px; color: var(--muted); white-space: nowrap; }
+  canvas { display: block; width: 100%; height: auto; border: 1px solid var(--line); border-radius: 6px; }
+  .big { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .big strong { font-size: 3rem; line-height: 1; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .big span { color: var(--muted); }
+  .big .tokens { margin-left: auto; font-family: var(--mono); font-size: 12px; }
+  .meter { position: relative; height: 7px; border-radius: 4px; background: var(--line); }
+  .meter .fill { position: absolute; inset: 0 auto 0 0; border-radius: 4px; background: var(--ok); }
+  .meter .tick { position: absolute; left: 85%; top: -4px; bottom: -4px; width: 2px; background: var(--muted); }
+  .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .chip { display: inline-flex; align-items: center; gap: 7px; font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: .1em; padding: 3px 10px; border-radius: 999px; border: 1px solid currentColor; color: var(--ok); }
+  .chip::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  [data-state="warn"] { --state: var(--warn); } [data-state="crit"] { --state: var(--crit); } [data-state="ok"] { --state: var(--ok); }
+  .chip[data-state] { color: var(--state); } .meter[data-state] .fill { background: var(--state); }
+  .advice { margin: 0; color: var(--muted); }
+  dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 12px; margin: 0; padding-top: 14px; border-top: 1px solid var(--line); }
+  dt { font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: .1em; color: var(--muted); }
+  dd { margin: 2px 0 0; font-size: 1.1rem; font-weight: 600; overflow-wrap: anywhere; }
+  .jobs { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; font-size: 13px; }
+  .jobs li { border-left: 2px solid var(--warn); padding-left: 10px; }
+  .jobs code { font-family: var(--mono); font-size: 11.5px; color: var(--muted); display: block; overflow-wrap: anywhere; }
+  button { font: 500 13px/1 var(--body); padding: 9px 14px; border-radius: 6px; cursor: pointer; border: 1px solid var(--line); background: transparent; color: var(--ink); }
+  button:hover { border-color: var(--muted); }
+  button:focus-visible { outline: 2px solid var(--pot-hi); outline-offset: 2px; }
+</style>
+</head>
+<body>
+<main class="wrap">
+  <header><h1 id="proj"></h1><span class="when" id="when"></span></header>
+  <canvas id="tree" width="600" height="462" aria-label="Bonsai tree showing current context use"></canvas>
+  <div class="big"><strong id="pct"></strong><span>% of context</span><span class="tokens" id="tokens"></span></div>
+  <div class="meter" id="meter"><div class="fill" id="fill"></div><div class="tick" title="Compact soon"></div></div>
+  <div class="row"><span class="chip" id="chip"></span><p class="advice" id="advice"></p></div>
+  <dl>
+    <div><dt>Branch</dt><dd id="branch"></dd></div>
+    <div><dt>Changed</dt><dd id="changed"></dd></div>
+    <div><dt>Compacts</dt><dd id="cc"></dd></div>
+    <div><dt>Last compact</dt><dd id="dropped"></dd></div>
+  </dl>
+  <ul class="jobs" id="jobs"></ul>
+  <div class="row"><button id="prune" type="button">Preview a prune</button></div>
+</main>
+<script>
+const DATA = /*DATA*/{};
+(function () {
+  const TAU = Math.PI * 2, VW = 600, VH = 462, BASELINE = 0.14;
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  function rng(seed) { return function () { seed = (seed + 0x6D2B79F5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+  const clamp = (v, a, b) => Math.min(b, Math.max(a, v)), lerp = (a, b, t) => a + (b - a) * t;
+
+  function buildTree(seed) {
+    const r = rng(seed), segs = [], pads = [], shoots = [], S = 1.45;
+    let x = 300, y = 398, w = 30, side = 1;
+    const trunkN = 6;
+    for (let i = 0; i < trunkN; i++) {
+      const len = (46 - i * 4) * S, a = -Math.PI / 2 + (i % 2 ? 1 : -1) * 0.34 + (r() - 0.5) * 0.08;
+      const nx = x + Math.cos(a) * len, ny = y + Math.sin(a) * len, birth = i * 0.03;
+      segs.push({ x1: x, y1: y, x2: nx, y2: ny, w1: w, w2: w * 0.83, birth, dur: 0.04, trunk: true });
+      if (i >= 1) { side = -side; const ba = side > 0 ? -0.16 - r() * 0.22 : Math.PI + 0.16 + r() * 0.22; branch(nx, ny, ba, (66 - i * 7 + r() * 12) * S, w * 0.42, 0, birth + 0.02); }
+      x = nx; y = ny; w *= 0.83;
+    }
+    branch(x, y, -Math.PI / 2 + (r() - 0.5) * 0.4, 26 * S, w * 0.85, 1, trunkN * 0.03 + 0.02);
+    function branch(x, y, a, len, w, depth, birth) {
+      const ex = x + Math.cos(a) * len, ey = y + Math.sin(a) * len + (depth === 0 ? len * 0.06 : 0);
+      segs.push({ x1: x, y1: y, x2: ex, y2: ey, w1: w, w2: w * 0.68, birth, dur: 0.045 });
+      const end = birth + 0.045;
+      if (depth >= 3 || len < 13 * S) { pads.push(makePad(ex, ey, end, 1)); return; }
+      for (let k = 0; k < 2; k++) { const spread = (k === 0 ? -1 : 1) * (0.34 + r() * 0.3); let na = a + spread; if (Math.sin(na) > 0.2) na = a + spread * 0.25; branch(ex, ey, na, len * (0.62 + r() * 0.12), w * 0.68, depth + 1, end + 0.005 + r() * 0.025); }
+      pads.push(makePad(ex, ey, end + (depth === 0 ? 0.005 : 0.04), depth === 0 ? 0.7 : 0.85));
+    }
+    function makePad(x, y, birth, scale) {
+      const leaves = [];
+      for (let i = 0; i < 30; i++) { const ang = r() * TAU, rad = Math.sqrt(r()); leaves.push({ dx: Math.cos(ang) * rad, dy: Math.sin(ang) * rad * 0.55 - 0.18, s: 0.6 + r() * 0.6, turn: r() * 0.12, rot: r() * TAU, order: r() }); }
+      return { x, y, birth, leaves, size: (17 + r() * 8) * scale * 1.35 };
+    }
+    pads.forEach(p => { if (r() < 0.5) { const a = -Math.PI / 2 + (r() - 0.5) * 2.0, len = (28 + r() * 36) * S, leaves = []; for (let i = 0; i < 5; i++) leaves.push({ t: 0.35 + r() * 0.65, s: 0.5 + r() * 0.4, turn: r() * 0.12, side: r() < 0.5 ? -1 : 1, rot: r() * TAU }); shoots.push({ x: p.x, y: p.y, a, len, bend: (r() - 0.5) * 0.6, birth: 0.64 + r() * 0.26, leaves }); } });
+    return { segs, pads, shoots };
+  }
+  const TREE = buildTree(11);
+  function makePile(count, seed) {
+    const r = rng(seed), out = [], n = Math.min(90, Math.round(count));
+    for (let i = 0; i < n; i++) { const left = r() < 0.5; const x = left ? lerp(128, 168, Math.pow(r(), 0.7)) : lerp(432, 472, 1 - Math.pow(r(), 0.7)); out.push({ x, y: 437 - r() * 3 * (1 - Math.abs((x - 300) / 300)), rot: r() * TAU, s: 0.6 + r() * 0.5, hue: r() }); }
+    for (let i = 0; i < n / 3; i++) out.push({ x: lerp(185, 415, r()), y: 399 + r() * 2, rot: r() * TAU, s: 0.5 + r() * 0.4, hue: r() });
+    return out;
+  }
+  let C = {};
+  function readColors() { const cs = getComputedStyle(document.documentElement), v = n => cs.getPropertyValue(n).trim(); C = { wall: v("--wall"), wall2: v("--wall-2"), pot: v("--pot"), potDark: v("--pot-dark"), potHi: v("--pot-hi"), wood: v("--wood"), woodDark: v("--wood-dark"), soil: v("--soil"), moss: v("--moss"), bark: v("--bark"), barkHi: v("--bark-hi"), line: v("--line"), leafLight: parseFloat(v("--leaf-light")) || 0 }; }
+  const STOPS = [[0, 102, 46, 46], [0.5, 118, 42, 37], [0.7, 128, 38, 31], [0.8, 52, 68, 45], [0.9, 26, 72, 44], [1.0, 8, 64, 38]];
+  function leafColor(g, alpha) { g = clamp(g, 0, 1); let i = 0; while (i < STOPS.length - 2 && g > STOPS[i + 1][0]) i++; const a = STOPS[i], b = STOPS[i + 1], t = clamp((g - a[0]) / (b[0] - a[0]), 0, 1); return `hsla(${lerp(a[1], b[1], t)}, ${lerp(a[2], b[2], t)}%, ${lerp(a[3], b[3], t) + C.leafLight}%, ${alpha})`; }
+  function leaf(ctx, x, y, s, rot, color) { ctx.save(); ctx.translate(x, y); ctx.rotate(rot); ctx.fillStyle = color; ctx.beginPath(); ctx.ellipse(0, 0, 4.4 * s, 2.4 * s, 0, 0, TAU); ctx.fill(); ctx.restore(); }
+  const lushness = g => 0.6 + 0.55 * clamp(g, 0, 1) + 0.35 * clamp((g - 0.7) / 0.3, 0, 1);
+  function shootPoint(sh, t) { const ex = sh.x + Math.cos(sh.a) * sh.len, ey = sh.y + Math.sin(sh.a) * sh.len, cx = (sh.x + ex) / 2 + Math.cos(sh.a + Math.PI / 2) * sh.len * sh.bend * 0.5, cy = (sh.y + ey) / 2 + Math.sin(sh.a + Math.PI / 2) * sh.len * sh.bend * 0.5, u = 1 - t; return { x: u * u * sh.x + 2 * u * t * cx + t * t * ex, y: u * u * sh.y + 2 * u * t * cy + t * t * ey }; }
+  function forEachLeaf(g, fn) {
+    const lush = lushness(g);
+    for (const p of TREE.pads) { const f = clamp((g - p.birth) / 0.12, 0, 1); if (f <= 0) continue; const R = p.size * lush * (0.45 + 0.55 * f); for (const l of p.leaves) { if (l.order > f) continue; fn(p.x + l.dx * R, p.y + l.dy * R, l.s, l.rot, g + l.turn, p.birth); } }
+    for (const sh of TREE.shoots) { const f = clamp((g - sh.birth) / 0.08, 0, 1); if (f <= 0) continue; for (const l of sh.leaves) { if (l.t > f) continue; const pt = shootPoint(sh, l.t); fn(pt.x + Math.cos(sh.a + Math.PI / 2) * 4 * l.side, pt.y + Math.sin(sh.a + Math.PI / 2) * 4 * l.side, l.s, l.rot, g + l.turn, sh.birth); } }
+  }
+  function draw(canvas, st) {
+    const ctx = canvas.getContext("2d"), W = canvas.width, H = canvas.height, g = st.g;
+    ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, W, H); ctx.setTransform(W / VW, 0, 0, H / VH, 0, 0);
+    const bg = ctx.createRadialGradient(170, 60, 20, 300, 240, 480); bg.addColorStop(0, C.wall); bg.addColorStop(1, C.wall2);
+    ctx.fillStyle = bg; ctx.fillRect(0, 0, VW, VH); ctx.fillStyle = C.wall2; ctx.fillRect(0, 452, VW, VH - 452); ctx.fillStyle = C.line; ctx.fillRect(0, 452, VW, 1.5);
+    ctx.fillStyle = C.woodDark; ctx.fillRect(140, 446, 14, 10); ctx.fillRect(446, 446, 14, 10);
+    ctx.fillStyle = C.wood; ctx.fillRect(116, 438, 368, 10); ctx.fillStyle = C.woodDark; ctx.fillRect(116, 446, 368, 2);
+    ctx.fillStyle = C.potDark; ctx.fillRect(190, 430, 22, 8); ctx.fillRect(388, 430, 22, 8);
+    ctx.fillStyle = C.pot; ctx.beginPath(); ctx.moveTo(172, 402); ctx.lineTo(428, 402); ctx.lineTo(412, 432); ctx.lineTo(188, 432); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = C.potDark; ctx.fillRect(166, 396, 268, 8); ctx.fillStyle = C.potHi; ctx.globalAlpha = 0.35; ctx.fillRect(180, 406, 240, 2); ctx.globalAlpha = 1;
+    ctx.strokeStyle = C.potHi; ctx.lineWidth = 1.6; ctx.lineCap = "round";
+    for (let i = 0; i < Math.min(st.cc, 12); i++) { const tx = 286 + (i % 6) * 6 - Math.min(st.cc, 6) * 3 + 3 + (i >= 6 ? 3 : 0), ty = i >= 6 ? 424 : 416; ctx.beginPath(); ctx.moveTo(tx, ty - 5); ctx.lineTo(tx, ty + 2); ctx.stroke(); }
+    ctx.fillStyle = C.soil; ctx.fillRect(176, 394, 248, 4);
+    const mr = rng(5); ctx.fillStyle = C.moss; for (let i = 0; i < 46; i++) { ctx.beginPath(); ctx.ellipse(180 + mr() * 240, 394 + mr() * 2, 3 + mr() * 5, 1.6 + mr() * 1.4, 0, 0, TAU); ctx.fill(); }
+    for (const l of st.pile) leaf(ctx, l.x, l.y, l.s, l.rot, leafColor(0.82 + l.hue * 0.2, 0.9));
+    const thick = 1 + 0.08 * Math.min(st.cc, 6); ctx.lineCap = "round"; ctx.lineJoin = "round";
+    for (const s of TREE.segs) {
+      const p = clamp((g - s.birth) / s.dur, 0, 1); if (p <= 0 && !(s.trunk && s.birth === 0)) continue;
+      const pp = s.trunk && s.birth === 0 ? Math.max(p, 0.35) : p, x2 = lerp(s.x1, s.x2, pp), y2 = lerp(s.y1, s.y2, pp);
+      const wmul = s.trunk ? thick * (0.55 + 0.45 * clamp(g / 0.5, 0, 1)) : (0.6 + 0.4 * clamp(g / 0.6, 0, 1));
+      ctx.strokeStyle = C.bark; ctx.lineWidth = Math.max(1.2, lerp(s.w1, s.w2, 0.5) * wmul); ctx.beginPath(); ctx.moveTo(s.x1, s.y1); ctx.lineTo(x2, y2); ctx.stroke();
+      if (s.trunk) { ctx.strokeStyle = C.barkHi; ctx.lineWidth = Math.max(1, ctx.lineWidth * 0.22); ctx.beginPath(); ctx.moveTo(s.x1 - 3, s.y1); ctx.lineTo(x2 - 3, y2); ctx.stroke(); }
+    }
+    ctx.strokeStyle = C.bark; ctx.lineWidth = 1.5;
+    for (const sh of TREE.shoots) { const f = clamp((g - sh.birth) / 0.08, 0, 1); if (f <= 0) continue; ctx.beginPath(); ctx.moveTo(sh.x, sh.y); for (let i = 1; i <= 12; i++) { const pt = shootPoint(sh, (i / 12) * f); ctx.lineTo(pt.x, pt.y); } ctx.stroke(); }
+    const lush = lushness(g);
+    for (const p of TREE.pads) { const f = clamp((g - p.birth) / 0.12, 0, 1); if (f <= 0) continue; const R = p.size * lush * (0.45 + 0.55 * f); ctx.fillStyle = leafColor(g, 0.22); ctx.beginPath(); ctx.ellipse(p.x, p.y - R * 0.12, R * 1.02, R * 0.5, 0, 0, TAU); ctx.fill(); }
+    forEachLeaf(g, (x, y, s, rot, gl) => leaf(ctx, x, y, s, rot, leafColor(gl, 0.95)));
+    for (const pt of st.particles) { ctx.globalAlpha = clamp(pt.life, 0, 1); leaf(ctx, pt.x, pt.y, pt.s, pt.rot, pt.color); }
+    ctx.globalAlpha = 1;
+  }
+
+  // ---------- real data ----------
+  const el = id => document.getElementById(id);
+  const fmtK = t => t >= 1e6 ? (t / 1e6).toPrecision(2).replace(/\.0$/, "") + "M" : Math.round(t / 1000) + "k";
+  const g0 = DATA.after_compact ? BASELINE : clamp((DATA.tokens || 0) / DATA.window, 0, 1);
+  const dropped = DATA.last_pre ? Math.max(0, DATA.last_pre / DATA.window - g0) : 0;
+  const st = { g: g0, cc: DATA.compactions || 0, pile: DATA.compactions ? makePile(dropped * 110, 100 + DATA.compactions) : [], particles: [] };
+  function stateFor(g) {
+    if (g < 0.35) return ["New growth", "ok", "Plenty of room."];
+    if (g < 0.66) return ["Full canopy", "ok", "Deep in a task, still comfortable."];
+    if (g < 0.8) return ["Wild shoots", "warn", "Tool output and old detail are piling up. Fine for now."];
+    if (g < 0.92) return ["Leaves turning", "warn", "Finish the current step, then compact."];
+    return ["Dropping leaves", "crit", "Compact now. Auto-compaction is close."];
+  }
+  function readout(g) {
+    const [label, s, advice] = stateFor(g);
+    el("pct").textContent = Math.round(g * 100);
+    el("chip").textContent = label; el("chip").dataset.state = s; el("meter").dataset.state = s;
+    el("fill").style.width = (g * 100).toFixed(1) + "%"; el("advice").textContent = advice;
+  }
+  el("proj").textContent = DATA.project || "Claude Code session";
+  el("when").textContent = "snapshot " + (DATA.at || "");
+  el("tokens").textContent = DATA.after_compact ? "compacted, waiting for a reply" : `${fmtK(DATA.tokens || 0)} of ${fmtK(DATA.window)} tokens`;
+  el("branch").textContent = DATA.branch || "–";
+  el("changed").textContent = DATA.changed == null ? "–" : DATA.changed;
+  el("cc").textContent = st.cc;
+  el("dropped").textContent = DATA.last_pre ? `${fmtK(DATA.last_pre)} → summary` : "–";
+  for (const j of DATA.jobs || []) {
+    const li = document.createElement("li"); li.textContent = "Running: " + (j.desc || j.id);
+    if (j.last) { const c = document.createElement("code"); c.textContent = j.last; li.append(c); }
+    el("jobs").append(li);
+  }
+  readout(st.g);
+
+  // ---------- motion: falling leaves near the limit, prune preview ----------
+  const canvas = el("tree");
+  let tween = null, ambientT = 0, last = performance.now();
+  function spawn(x, y, s, rot, color, burst) { st.particles.push({ x, y, s, rot, color, vx: (Math.random() - 0.5) * (burst ? 1.6 : 0.5), vy: burst ? -Math.random() * 1.2 : 0, vr: (Math.random() - 0.5) * 0.15, sway: Math.random() * TAU, life: 1, landed: false }); }
+  el("prune").addEventListener("click", () => {
+    if (tween) return;
+    const from = Math.max(st.g, 0.9), to = st.g;
+    if (!reduceMotion) { const c = []; forEachLeaf(from, (x, y, s, rot, gl, birth) => { if (birth > BASELINE && Math.random() < 0.2) c.push([x, y, s, rot, leafColor(gl, 0.95)]); }); c.slice(0, 140).forEach(a => spawn(...a, true)); }
+    st.g = from; tween = { from, to, t0: performance.now() + 250, dur: 1000 };
+  });
+  function frame(now) {
+    const dt = Math.min(50, now - last); last = now;
+    if (tween && now >= tween.t0) { const t = clamp((now - tween.t0) / tween.dur, 0, 1); st.g = lerp(tween.from, tween.to, 1 - Math.pow(1 - t, 3)); readout(st.g); if (t >= 1) tween = null; }
+    if (!reduceMotion && st.g > 0.9 && !tween && (ambientT += dt) > 450) { ambientT = 0; const pool = []; forEachLeaf(st.g, (x, y, s, rot, gl) => { if (gl > 0.93) pool.push([x, y, s, rot, leafColor(gl, 0.95)]); }); if (pool.length) spawn(...pool[Math.floor(Math.random() * pool.length)], false); }
+    for (const p of st.particles) { if (!p.landed) { p.vy = Math.min(1.6, p.vy + 0.035 * dt / 16); p.sway += 0.05 * dt / 16; p.x += (p.vx + Math.sin(p.sway) * 0.5) * dt / 16; p.y += p.vy * dt / 16; p.rot += p.vr * dt / 16; const floor = p.x > 116 && p.x < 484 ? 437 : 451; if (p.y >= floor) { p.y = floor; p.landed = true; } } else p.life -= dt / 1600; }
+    st.particles = st.particles.filter(p => p.life > 0);
+    draw(canvas, st);
+    requestAnimationFrame(frame);
+  }
+  function fit() { const dpr = Math.min(2, window.devicePixelRatio || 1), w = Math.max(240, canvas.clientWidth); canvas.width = Math.round(w * dpr); canvas.height = Math.round(w * dpr * VH / VW); }
+  window.addEventListener("resize", fit);
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", readColors);
+  readColors(); fit(); requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

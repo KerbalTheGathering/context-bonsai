@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+
+# per-machine widget state
+widget/bonsai.json
+widget/signal.json
+widget/signal.json.tmp
+
+# generated previews
+icon_preview.png
+context-bonsai.html
+!mockup/context-bonsai.html
