@@ -16,6 +16,7 @@ import subprocess
 import sys
 import time
 import tkinter as tk
+import zlib
 from datetime import datetime
 
 from PIL import Image, ImageDraw, ImageFont, ImageTk
@@ -39,6 +40,7 @@ BASELINE = 0.14
 SS = 2  # supersampling for smooth edges
 CROP = (30, 0, 570, 462)  # part of the 600x480 mockup scene the widget shows
 GROVE_CROP = (70, 0, 530, 462)  # tighter crop for the small trees in the grove
+FOCUS_CROP = (30, -95, 570, 462)  # the card's scene: extra wall above the canopy for the % readout
 GROVE_MINUTES = 30  # sessions active within this window get a tree
 GROVE_MAX = 4
 FONTS = "C:/Windows/Fonts/"
@@ -131,10 +133,22 @@ def mulberry(seed):
 
 
 # ---------- tree structure (same shape as the mockup) ----------
-def build_tree(seed=11):
+def build_tree(seed=11, vary=False):
+    """The mockup's tree for seed 11. With vary=True the seed also picks the tree's overall style
+    (lean, trunk zigzag, height, branch length and spread, mirroring) so sessions look distinct."""
     r = mulberry(seed)
     segs, pads, shoots = [], [], []
     S = 1.45
+    zig, lean, trunk_n, branch_mul, spread_mul, mirror = 0.34, 0.0, 6, 1.0, 1.0, False
+    if vary:
+        v = mulberry(seed ^ 0x5BD1E995)
+        zig = 0.16 + v() * 0.32
+        lean = (v() - 0.5) * 0.44
+        trunk_n = 5 + int(v() * 3)
+        branch_mul = 0.8 + v() * 0.28
+        spread_mul = 0.8 + v() * 0.5
+        mirror = v() < 0.5
+        S = 1.32 + v() * 0.18
 
     def make_pad(x, y, birth, scale):
         leaves = []
@@ -153,7 +167,7 @@ def build_tree(seed=11):
             pads.append(make_pad(ex, ey, end, 1))
             return
         for k in range(2):
-            spread = (-1 if k == 0 else 1) * (0.34 + r() * 0.3)
+            spread = (-1 if k == 0 else 1) * (0.34 + r() * 0.3) * spread_mul
             na = a + spread
             if math.sin(na) > 0.2:
                 na = a + spread * 0.25
@@ -161,10 +175,10 @@ def build_tree(seed=11):
         pads.append(make_pad(ex, ey, end + (0.005 if depth == 0 else 0.04), 0.7 if depth == 0 else 0.85))
 
     x, y, w, side = 300, 398, 30, 1
-    trunk_n = 6
+    seg_scale = 6 / trunk_n  # taller trunks get shorter segments so the tree stays in frame
     for i in range(trunk_n):
-        ln = (46 - i * 4) * S
-        a = -math.pi / 2 + (1 if i % 2 else -1) * 0.34 + (r() - 0.5) * 0.08
+        ln = (46 - i * 4 * seg_scale) * S * seg_scale
+        a = -math.pi / 2 + (1 if i % 2 else -1) * zig + lean * (i + 1) / trunk_n + (r() - 0.5) * 0.08
         nx, ny = x + math.cos(a) * ln, y + math.sin(a) * ln
         birth = i * 0.03
         segs.append({"x1": x, "y1": y, "x2": nx, "y2": ny, "w1": w, "w2": w * 0.83, "birth": birth,
@@ -172,9 +186,9 @@ def build_tree(seed=11):
         if i >= 1:
             side = -side
             ba = -0.16 - r() * 0.22 if side > 0 else math.pi + 0.16 + r() * 0.22
-            branch(nx, ny, ba, (66 - i * 7 + r() * 12) * S, w * 0.42, 0, birth + 0.02)
+            branch(nx, ny, ba, (66 - i * 7 * seg_scale + r() * 12) * S * branch_mul, w * 0.42, 0, birth + 0.02)
         x, y, w = nx, ny, w * 0.83
-    branch(x, y, -math.pi / 2 + (r() - 0.5) * 0.4, 26 * S, w * 0.85, 1, trunk_n * 0.03 + 0.02)
+    branch(x, y, -math.pi / 2 + lean + (r() - 0.5) * 0.4, 26 * S, w * 0.85, 1, trunk_n * 0.03 + 0.02)
 
     for p in pads:
         if r() < 0.5:
@@ -184,6 +198,17 @@ def build_tree(seed=11):
                        "side": -1 if r() < 0.5 else 1, "rot": r() * TAU} for _ in range(5)]
             shoots.append({"x": p["x"], "y": p["y"], "a": a, "len": ln, "bend": (r() - 0.5) * 0.6,
                            "birth": 0.64 + r() * 0.26, "leaves": leaves})
+    if mirror:  # flip around the pot's center line
+        for s in segs:
+            s["x1"], s["x2"] = 600 - s["x1"], 600 - s["x2"]
+        for p in pads:
+            p["x"] = 600 - p["x"]
+            for l in p["leaves"]:
+                l["dx"] = -l["dx"]
+        for sh in shoots:
+            sh["x"], sh["a"], sh["bend"] = 600 - sh["x"], math.pi - sh["a"], -sh["bend"]
+            for l in sh["leaves"]:
+                l["side"] = -l["side"]
     return {"segs": segs, "pads": pads, "shoots": shoots}
 
 
@@ -231,10 +256,11 @@ def shoot_point(sh, t):
     return (u * u * sh["x"] + 2 * u * t * cx + t * t * ex, u * u * sh["y"] + 2 * u * t * cy + t * t * ey)
 
 
-def each_leaf(g):
+def each_leaf(g, tree=None):
     """Yield (x, y, size, rot, color_g, birth) for every visible leaf at growth g."""
+    tree = tree or TREE
     lush = lushness(g)
-    for p in TREE["pads"]:
+    for p in tree["pads"]:
         f = clamp((g - p["birth"]) / 0.12, 0, 1)
         if f <= 0:
             continue
@@ -242,7 +268,7 @@ def each_leaf(g):
         for l in p["leaves"]:
             if l["order"] <= f:
                 yield p["x"] + l["dx"] * R, p["y"] + l["dy"] * R, l["s"], l["rot"], g + l["turn"], p["birth"]
-    for sh in TREE["shoots"]:
+    for sh in tree["shoots"]:
         f = clamp((g - sh["birth"]) / 0.08, 0, 1)
         if f <= 0:
             continue
@@ -327,7 +353,8 @@ class Scene:
         for (px, py) in (a, b):  # round caps
             d.ellipse([px - r, py - r, px + r, py + r], fill=fill)
 
-    def render(self, g, cc, pile):
+    def render(self, g, cc, pile, tree=None):
+        tree = tree or TREE
         img = self.bg.copy()
         d = ImageDraw.Draw(img)
         # compaction tally marks on the pot
@@ -339,7 +366,7 @@ class Scene:
         for l in pile:
             self.leaf(d, l["x"], l["y"], l["s"], l["rot"], leaf_color(0.82 + l["hue"] * 0.2, 230))
         thick = 1 + 0.08 * min(cc, 6)
-        for s in TREE["segs"]:
+        for s in tree["segs"]:
             first = s.get("trunk") and s["birth"] == 0
             p = clamp((g - s["birth"]) / s["dur"], 0, 1)
             if p <= 0 and not first:
@@ -354,7 +381,7 @@ class Scene:
             self.seg(d, s["x1"], s["y1"], x2, y2, width, C["bark"])
             if s.get("trunk"):
                 self.seg(d, s["x1"] - 3, s["y1"], x2 - 3, y2, max(1, width * 0.22), C["barkHi"])
-        for sh in TREE["shoots"]:
+        for sh in tree["shoots"]:
             f = clamp((g - sh["birth"]) / 0.08, 0, 1)
             if f <= 0:
                 continue
@@ -364,13 +391,13 @@ class Scene:
         shade = Image.new("RGBA", img.size)
         sd = ImageDraw.Draw(shade)
         lush = lushness(g)
-        for p in TREE["pads"]:
+        for p in tree["pads"]:
             f = clamp((g - p["birth"]) / 0.12, 0, 1)
             if f > 0:
                 R = p["size"] * lush * (0.45 + 0.55 * f)
                 self.ellipse(sd, p["x"], p["y"] - R * 0.12, R * 1.02, R * 0.5, leaf_color(g, 56))
         img.alpha_composite(shade)
-        for x, y, s, rot, gl, _ in each_leaf(g):
+        for x, y, s, rot, gl, _ in each_leaf(g, tree):
             self.leaf(d, x, y, s, rot, leaf_color(gl, 255))
         return img.resize((self.w, self.h), Image.LANCZOS)
 
@@ -439,6 +466,7 @@ class Stats:
     def totals(self):
         if self._totals is None:
             inp = cread = cwrite = out = think = peak = 0
+            series = []  # context size of each API call, in order
             for u in self.usage.values():
                 i, r, w = (u.get("input_tokens", 0), u.get("cache_read_input_tokens", 0),
                            u.get("cache_creation_input_tokens", 0))
@@ -446,9 +474,11 @@ class Stats:
                 out += u.get("output_tokens", 0)
                 think += (u.get("output_tokens_details") or {}).get("thinking_tokens", 0)
                 peak = max(peak, i + r + w)
+                series.append(i + r + w)
             total = inp + cread + cwrite
             self._totals = {"cache": cread / total if total else None, "out": out, "think": think,
-                            "peak": peak, "calls": len(self.usage)}
+                            "peak": peak, "calls": len(self.usage), "series": series,
+                            "avg": total / len(series) if series else 0, "total": total + out}
         return self._totals
 
 
@@ -487,6 +517,15 @@ class Session:
     @property
     def name(self):
         return os.path.basename(os.path.normpath(self.cwd)) if self.cwd else "session"
+
+    @property
+    def tree(self):
+        """Each session grows its own tree shape, seeded from its transcript name."""
+        key = os.path.basename(self.path or "")
+        if getattr(self, "_tree_key", None) != key:
+            self._tree_key = key
+            self._tree = build_tree(zlib.crc32(key.encode()), vary=True) if key else TREE
+        return self._tree
 
     def refresh(self):
         """Returns True when the data changed."""
@@ -625,18 +664,26 @@ def git_state(cwd):
 
 def stage_for(g):
     if g < 0.35:
-        return "New growth", "ok", "Plenty of room."
+        return "New growth", "ok", "plenty of room"
     if g < 0.66:
-        return "Full canopy", "ok", "Deep in a task, still comfortable."
+        return "Full canopy", "ok", "still comfortable"
     if g < 0.80:
-        return "Wild shoots", "warn", "Old detail is piling up. Fine for now."
+        return "Wild shoots", "warn", "old detail piling up"
     if g < 0.92:
-        return "Leaves turning", "warn", "Finish this step, then compact."
-    return "Dropping leaves", "crit", "Compact now. Auto-compact is close."
+        return "Leaves turning", "warn", "finish this step, then compact"
+    return "Dropping leaves", "crit", "compact now"
 
 
 def fmt_k(t):
     return f"{t / 1e6:.2g}M" if t >= 1e6 else f"{round(t / 1000)}k"
+
+
+def fmt_tok(t):
+    return f"{t / 1e6:.1f}M" if t >= 1e6 else f"{round(t / 1000)}k"
+
+
+def plural(n, word):
+    return f"{word}" if n == 1 else f"{word}s"
 
 
 def fmt_dur(sec):
@@ -687,7 +734,7 @@ class Widget:
         self.f = self.root.winfo_fpixels("1i") / 96
         self.W = round(self.BASE_W * self.f)
         self.pad = round(14 * self.f)
-        self.scene = Scene(self.W - 2 * self.pad)
+        self.make_scenes()
         self.sessions = {}  # transcript path -> Session, one per tree in the grove
         self.order = []  # grove order, oldest tree first so trees don't jump around
         self.focus_path = None
@@ -707,6 +754,8 @@ class Widget:
             "body": font("segoeui.ttf", 11 * self.f), "small": font("segoeui.ttf", 10 * self.f),
             "mono": font("CascadiaMono.ttf", 9 * self.f, "consola.ttf"),
             "button": font("seguisb.ttf", 10 * self.f), "symbol": font("seguisym.ttf", 11 * self.f),
+            "light": font("segoeuil.ttf", 34 * self.f, "segoeui.ttf"), "sub": font("segoeui.ttf", 10.5 * self.f),
+            "num": font("seguisb.ttf", 11 * self.f), "icon": font("SegoeIcons.ttf", 12 * self.f, "segmdl2.ttf"),
         }
         self.g = None
         self.tween = None
@@ -855,8 +904,8 @@ class Widget:
             self.set_phase("idle")
             if self.resume_follow:
                 self.follow, self.resume_follow = True, False
-        if self.phase == "idle" and self.tween is None:
-            self.g = s.g
+        if self.phase == "idle" and self.tween is None and abs(s.g - self.g) > 0.002:
+            self.tween = (self.g, s.g, now, 1.2)  # grow (or settle) smoothly to the new context size
         self.draw()
 
     def check_signal(self):
@@ -901,7 +950,7 @@ class Widget:
         self.set_phase("pruned")
 
     def prune(self, frm, to):
-        falling = [l for l in each_leaf(frm) if l[5] > BASELINE]
+        falling = [l for l in each_leaf(frm, self.session.tree) if l[5] > BASELINE]
         for x, y, s, rot, gl, _ in random.sample(falling, min(130, len(falling))):
             self.spawn(x, y, s, rot, leaf_color(gl), burst=True)
         dropped = max(0.0, frm - to)
@@ -915,7 +964,7 @@ class Widget:
         for i in range(28):
             self.particles.append({"kind": "drop", "x": lerp(205, 395, random.random()), "y": 60 + random.random() * 90,
                                    "vy": 4 + random.random() * 2, "life": 1.0, "wait": i * 45 + random.random() * 80})
-        leaves = list(each_leaf(min(1.0, max(self.session.g, BASELINE) + 0.15)))  # buds where growth comes next
+        leaves = list(each_leaf(min(1.0, max(self.session.g, BASELINE) + 0.15), self.session.tree))  # next growth
         for i, (x, y, *_r) in enumerate(random.sample(leaves, min(26, len(leaves)))):
             self.particles.append({"kind": "bud", "x": x, "y": y, "life": 1.0, "wait": 1300 + i * 55})
         text = (msg or "").replace("↻ restored:", "").strip() or "state restored"
@@ -964,9 +1013,9 @@ class Widget:
 
     # --- animation ---
     def leaves_at(self, g):
-        key = round(g, 3)
+        key = (self.focus_path, round(g, 3))
         if self.leaf_cache[0] != key:
-            self.leaf_cache = (key, list(each_leaf(g)))
+            self.leaf_cache = (key, list(each_leaf(g, self.session.tree)))
         return self.leaf_cache[1]
 
     def tick(self):
@@ -1038,11 +1087,18 @@ class Widget:
         self.root.after(dt, self.tick)
 
     # --- drawing ---
+    def make_scenes(self):
+        # the card's scene runs edge to edge with headroom above the canopy for the % readout
+        self.scenes = {"card": Scene(self.W, FOCUS_CROP), "zen": Scene(self.W - 2 * self.pad, CROP)}
+        self.scene = self.scenes["card"]
+        self.tree_key = None
+
     def tree(self):
-        key = (round(self.g, 3), self.session.compactions, len(self.pile))
+        s = self.session
+        key = (id(self.scene), s.path, round(self.g, 3), s.compactions, len(self.pile))
         if key != self.tree_key:
             self.tree_key = key
-            self.tree_img = self.scene.render(self.g, self.session.compactions, self.pile)
+            self.tree_img = self.scene.render(self.g, s.compactions, self.pile, s.tree)
         return self.tree_img
 
     def V(self, x, y):
@@ -1115,6 +1171,7 @@ class Widget:
 
     def draw(self):
         self.hits = []
+        self.scene = self.scenes["zen" if self.cfg.get("zen") else "card"]
         if self.cfg.get("zen"):
             img = self.render_zen()
         else:
@@ -1171,7 +1228,7 @@ class Widget:
             key = (round(g, 3), s.compactions)
             cached = self.grove_cache.get(p)
             if not cached or cached[0] != key:
-                cached = self.grove_cache[p] = (key, scene.render(g, s.compactions, []))
+                cached = self.grove_cache[p] = (key, scene.render(g, s.compactions, [], s.tree))
             img.paste(cached[1], (round(x), round(y0)), cached[1])
             cx = x + cell / 2
             yy = y0 + scene.h + 8 * f
@@ -1214,7 +1271,7 @@ class Widget:
                 key = (round(s.g, 3), s.compactions)
                 cached = self.grove_cache.get(p)
                 if not cached or cached[0] != key:
-                    cached = self.grove_cache[p] = (key, scene.render(s.g, s.compactions, []))
+                    cached = self.grove_cache[p] = (key, scene.render(s.g, s.compactions, [], s.tree))
                 x = m + i * (cell + m)
                 img.paste(cached[1], (x, m), cached[1])
                 self.hits.append(((x, m, x + cell, m + scene.h), "open", p))
@@ -1251,170 +1308,223 @@ class Widget:
         self.draw()
 
     def render_focus(self):
-        s, f, F, pad = self.session, self.f, self.fonts, self.pad
+        """The session card: identity, the tree with its readout, status, tokens, then grouped stats."""
+        s, f, F, pad, W = self.session, self.f, self.fonts, self.pad, self.W
         now = time.time()
-        tree = self.tree().copy()
-        tree.alpha_composite(self.overlay(tree.size))
-
-        H = round(pad + 22 * f + 8 * f + tree.height + 12 * f + 40 * f + 14 * f + 34 * f + 108 * f + pad)
-        img = Image.new("RGBA", (self.W, H), C["panel"])
-        d = ImageDraw.Draw(img)
-        d.rectangle([0, 0, self.W - 1, H - 1], outline=C["line"])
-        y = pad
-        proj = os.path.basename(os.path.normpath(s.cwd)) if s.cwd else "No session"
-        ago = now - s.mtime if s.mtime else 9e9
-        status = fmt_ago(ago)
-        live = status == "live"
-        sw = d.textlength(status, font=F["mono"])
-        d.text((self.W - pad - sw, y + 4 * f), status, font=F["mono"], fill=C["ok"] if live else C["muted"])
-        if live:
-            r = 3 * f
-            cx, cy = self.W - pad - sw - 8 * f, y + 10 * f
-            d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=C["ok"])
-        tx = pad
-        if len(self.order) > 1:  # back to the grove
-            back = f"‹ {len(self.order)}"
-            bw_ = d.textlength(back, font=F["title"]) + 10 * f
-            hovered = self.hover_key == ("grove", None)
-            if hovered:
-                d.rounded_rectangle([pad - 5 * f, y - 2 * f, pad + bw_ - 3 * f, y + 21 * f], radius=6 * f, fill=C["line"])
-            d.text((pad, y), back, font=F["title"], fill=C["ink"] if hovered else C["muted"])
-            self.hits.append(((pad - 5 * f, y - 2 * f, pad + bw_ - 3 * f, y + 21 * f), "grove", None))
-            tx = pad + bw_ + 2 * f
-        d.text((tx, y), ellipsize(d, proj, F["title"], self.W - tx - pad - sw - 20 * f), font=F["title"],
-               fill=C["ink"])
-        y += 22 * f + 8 * f
-        img.paste(tree, (pad, round(y)), tree)
-        y += tree.height + 12 * f
-
         g = self.g
         label, state, advice = stage_for(g)
         if self.phase in PHASE_TEXT:
             label, state = PHASE_TEXT[self.phase]
         col = C[state]
-        pct = f"{round(g * 100)}"
-        d.text((pad, y - 6 * f), pct, font=F["big"], fill=C["ink"])
-        pw = d.textlength(pct, font=F["big"])
-        d.text((pad + pw + 2 * f, y + 13 * f), "%  of context", font=F["body"], fill=C["muted"])
+        tree = self.tree().copy()
+        tree.alpha_composite(self.overlay(tree.size))
+        img = Image.new("RGBA", (W, round(tree.height + 420 * f)), C["panel"])  # cropped to fit at the end
+        d = ImageDraw.Draw(img)
+
+        # identity: session title, then project · branch · changes
+        y = pad
+        x = pad
+        if len(self.order) > 1:  # back to the grove
+            back = f"‹ {len(self.order)}"
+            bw_ = d.textlength(back, font=F["title"]) + 10 * f
+            hovered = self.hover_key == ("grove", None)
+            rect = (pad - 5 * f, y - 3 * f, pad + bw_ - 3 * f, y + 19 * f)
+            if hovered:
+                d.rounded_rectangle(rect, radius=6 * f, fill=C["line"])
+            d.text((pad, y - 2 * f), back, font=F["title"], fill=C["ink"] if hovered else C["muted"])
+            self.hits.append((rect, "grove", None))
+            x = pad + bw_ + 2 * f
+        ago = now - s.mtime if s.mtime else 9e9
+        live = ago < 60
+        idle = "" if live else fmt_ago(ago).replace("idle ", "")
+        iw = d.textlength(idle, font=F["sub"]) + (6 * f if idle else 0)
+        r = 3.5 * f
+        d.ellipse([W - pad - 2 * r, y + 4 * f, W - pad, y + 4 * f + 2 * r], fill=C["ok"] if live else C["muted"])
+        if idle:
+            d.text((W - pad - 2 * r - iw, y + 1 * f), idle, font=F["sub"], fill=C["muted"])
+        title = s.title or (s.name if s.cwd else "No session")
+        d.text((x, y - 2 * f), ellipsize(d, title, F["title"], W - x - pad - 2 * r - iw - 8 * f), font=F["title"],
+               fill=C["ink"])
+        y += 20 * f
+        branch, dirty = s.git
+        parts = [s.name] if s.cwd and s.title and s.title != s.name else []
+        if branch:
+            parts.append("⎇")
+            parts.append(f"{branch}  ·  " + (f"{dirty} changed" if dirty else "clean"))
+        x = pad
+        for i, part in enumerate(parts):
+            if part == "⎇":
+                d.text((x, y - 1 * f), part, font=F["symbol"], fill=C["muted"])
+                x += d.textlength(part, font=F["symbol"]) + 3 * f
+                continue
+            text = part + ("  ·  " if i + 1 < len(parts) and parts[i + 1] != "⎇" else ("  ·  " if i + 1 < len(parts) else ""))
+            text = ellipsize(d, text, F["sub"], W - pad - x)
+            d.text((x, y), text, font=F["sub"], fill=C["muted"])
+            x += d.textlength(text, font=F["sub"])
+        y = round(52 * f)
+
+        # hero: the tree edge to edge, readout on the wall, the shelf edge doubles as the meter
+        ty = y
+        img.paste(tree, (0, ty), tree)
+        halo = {"stroke_width": max(1, round(3 * f)), "stroke_fill": C["wall"]}
+        pct = f"{round(g * 100)}%"
+        d.text((pad, ty + 2 * f), pct, font=F["light"], fill=C["ink"], **halo)
+        pw = d.textlength(pct, font=F["light"])
         if s.after_compact:
-            tok = "compacted · waiting"
+            tok = "compacted, waiting for a reply"
         elif s.tokens is not None:
-            tok = f"{fmt_k(s.tokens)} / {fmt_k(self.cfg['window'])}"
+            tok = f"{fmt_tok(s.tokens)} of {fmt_k(self.cfg['window'])}"
         else:
             tok = ""
-        tw = d.textlength(tok, font=F["mono"])
-        d.text((self.W - pad - tw, y + 15 * f), tok, font=F["mono"], fill=C["muted"])
-        y += 40 * f
-        # meter: fill level, or a sliding shimmer while compacting
-        mh = 6 * f
-        x0, x1 = pad, self.W - pad
-        d.rounded_rectangle([x0, y, x1, y + mh], radius=mh / 2, fill=C["line"])
-        if self.phase == "compacting":
-            span = (x1 - x0) * 0.3
-            t = (now * 0.6) % 1
-            a = x0 + (x1 - x0 + span) * t - span
-            d.rounded_rectangle([max(x0, a), y, min(x1, a + span), y + mh], radius=mh / 2, fill=col)
+        d.text((pad + pw + 8 * f, ty + 24 * f), tok, font=F["sub"], fill=C["muted"], **halo)
+        shelf = ty + (452 - self.scene.crop[1]) * self.scene.k
+        mh = 4 * f
+        d.rectangle([0, shelf - mh / 2, W, shelf + mh / 2], fill=C["line"])
+        if self.phase == "compacting":  # a shimmer slides along the shelf while compacting
+            span = W * 0.3
+            a = (W + span) * ((now * 0.6) % 1) - span
+            d.rectangle([max(0, a), shelf - mh / 2, min(W, a + span), shelf + mh / 2], fill=col)
         else:
-            fw = max(mh, (x1 - x0) * clamp(g, 0, 1))
-            d.rounded_rectangle([x0, y, x0 + fw, y + mh], radius=mh / 2, fill=col)
-            tx = x0 + (x1 - x0) * 0.85
-            d.rectangle([tx - f, y - 4 * f, tx + f, y + mh + 4 * f], fill=C["muted"])
-        y += mh + 8 * f
-        # stage chip + compact button
-        cw = d.textlength(label.upper(), font=F["mono"])
-        d.rounded_rectangle([pad, y, pad + cw + 22 * f, y + 18 * f], radius=9 * f, outline=col, width=max(1, round(f)))
-        d.ellipse([pad + 7 * f, y + 6.5 * f, pad + 12 * f, y + 11.5 * f], fill=col)
-        d.text((pad + 16 * f, y + 3 * f), label.upper(), font=F["mono"], fill=col)
-        self.draw_button(d, y - 1 * f)
-        y += 24 * f
-        caption, ccol = advice, "muted"
+            d.rectangle([0, shelf - mh / 2, W * clamp(g, 0, 1), shelf + mh / 2], fill=col)
+            tx = W * 0.85
+            d.rectangle([tx - f, shelf - 5 * f, tx + f, shelf + 5 * f], fill=C["muted"])
+        y = ty + tree.height + 10 * f
+
+        # status: stage (or compaction progress) and the compact button
+        text, tcol = advice, "muted"
         if self.phase == "armed":
-            caption = ("Copied. In Claude: Ctrl+V, then Enter." if self.found_app
-                       else "Copied /compact. Paste it into Claude.")
-            ccol = "warn"
+            text = "copied: Ctrl+V, Enter in Claude" if self.found_app else "copied /compact: paste it in Claude"
+            tcol = "warn"
         elif self.phase == "compacting":
-            el = int(now - self.phase_at)
             exp = s.last_duration
-            caption = f"Compacting… {el}s" + (f" of ~{round(exp)}s" if exp else "")
-            ccol = "ink"
+            text = f"{int(now - self.phase_at)}s" + (f" of ~{round(exp)}s" if exp else "")
         elif self.phase in ("pruned", "watering"):
-            caption, ccol = "Pruned. Restoring state…", "ink"
+            text = "restoring state…"
         elif self.caption and now < self.caption[2]:
-            caption, ccol = self.caption[0], self.caption[1]
-        d.text((pad, y), ellipsize(d, caption, F["small"], self.W - 2 * pad), font=F["small"], fill=C[ccol])
-        y += 26 * f
-        # stats: "Now" (current state) and "Session" (totals) tabs
-        d.line([(pad, y), (self.W - pad, y)], fill=C["line"], width=max(1, round(f)))
-        page = self.cfg.get("page", "now")
-        tx = pad
-        for key, text in (("now", "NOW"), ("session", "SESSION")):
-            tw = d.textlength(text, font=F["mono"])
-            active = page == key
-            hovered = self.hover_key == ("page", key)
-            d.text((tx, y + 6 * f), text, font=F["mono"], fill=C["ink"] if active or hovered else C["muted"])
-            if active:
-                d.rectangle([tx, y, tx + tw, y + max(1, round(2 * f))], fill=C[state])
-            self.hits.append(((tx - 4 * f, y, tx + tw + 4 * f, y + 20 * f), "page", key))
-            tx += tw + 16 * f
-        y += 24 * f
+            text, tcol = self.caption[0], self.caption[1]
+        d.ellipse([pad, y + 6 * f, pad + 7 * f, y + 13 * f], fill=col)
+        d.text((pad + 13 * f, y + 1 * f), label, font=F["num"], fill=C["ink"])
+        lw = d.textlength(label, font=F["num"])
+        bx0 = self.draw_button(d, y - 3 * f)
+        d.text((pad + 13 * f + lw, y + 1 * f), ellipsize(d, "  ·  " + text, F["body"], bx0 - 8 * f - (pad + 13 * f + lw)),
+               font=F["body"], fill=C[tcol])
+        y += 32 * f
+        if s.jobs:  # only while something is running
+            n = len(s.jobs)
+            desc = s.jobs[0].get("desc") or ""
+            jt = ellipsize(d, f"{n} {plural(n, 'job')} running" + (f" · {desc}" if desc else ""), F["small"],
+                           W - 2 * pad - 36 * f)
+            jw = d.textlength(jt, font=F["small"]) + 34 * f
+            d.rounded_rectangle([pad, y - 4 * f, pad + jw, y + 16 * f], radius=10 * f, outline=C["warn"],
+                                width=max(1, round(f)))
+            d.text((pad + 9 * f, y - 1 * f), "", font=F["icon"], fill=C["warn"])
+            d.text((pad + 26 * f, y - 1 * f), jt, font=F["small"], fill=C["warn"])
+            y += 26 * f
+
+        # tokens: context per call over the session, then peak / avg / total
         st, tot = s.stats, s.stats.totals
-        if page == "session":
-            cache = tot["cache"]
-            ccol = "ink" if cache is None or cache >= 0.8 else "warn" if cache >= 0.5 else "crit"
-            calls = sum(st.tools.values())
-            stats = [
-                ("CACHE", "–" if cache is None else f"{cache:.0%}", ccol), ("OUTPUT", fmt_k(tot["out"]), "ink"),
-                ("THINKING", fmt_k(tot["think"]), "ink"), ("TOOLS", str(calls), "ink"),
-                ("ERRORS", str(st.errors), "warn" if calls and st.errors / calls > 0.1 else "ink"),
-                ("FILES", str(len(st.files)), "ink"),
-            ]
-            top = " · ".join(f"{name} {n}" for name, n in st.tools.most_common(3))
-            footer = "Top: " + top if top else "No tool calls yet"
+        d.line([(pad, y), (W - pad, y)], fill=C["line"], width=max(1, round(f)))
+        y += 10 * f
+        if len(tot["series"]) >= 2:
+            self.sparkline(img, pad, y, W - 2 * pad, 34 * f, tot["series"], col)
+            d = ImageDraw.Draw(img)
+            y += 40 * f
+            self.runs(d, pad, y, [(fmt_tok(tot["peak"]), "n"), (" peak · ", "u"), (fmt_tok(tot["avg"]), "n"),
+                                  (" avg · ", "u"), (fmt_tok(tot["total"]), "n"), (" total", "u")])
         else:
-            branch, dirty = s.git
-            jobs = len(s.jobs)
-            stats = [
-                ("BRANCH", branch or "–", "ink"), ("CHANGED", "–" if dirty is None else str(dirty), "ink"),
-                ("JOBS", str(jobs) if jobs else "none", "warn" if jobs else "ink"),
-                ("COMPACTS", str(s.compactions), "ink"),
-                ("PEAK", fmt_k(tot["peak"]) if tot["peak"] else "–", "ink"),
-                ("LAST ASK", fmt_since(now - st.last_prompt) if st.last_prompt else "–", "ink"),
-            ]
-            parts = []
-            if st.started and s.mtime:
-                parts.append(fmt_dur(s.mtime - st.started) + " long")
-            parts.append(f"{st.prompts} prompt" + ("" if st.prompts == 1 else "s"))
-            parts.append(f"{tot['calls']} API calls")
-            if st.subagents:
-                parts.append(f"{st.subagents} subagent" + ("" if st.subagents == 1 else "s"))
-            footer = " · ".join(parts)
-        colw = (self.W - 2 * pad) / 2
-        for i, (k, v, vc) in enumerate(stats):
-            cx = pad + (i % 2) * colw
-            cy = y + (i // 2) * 22 * f
-            d.text((cx, cy + 2 * f), k, font=F["mono"], fill=C["muted"])
-            kw = d.textlength(k, font=F["mono"]) + 6 * f
-            d.text((cx + kw, cy - 1 * f), ellipsize(d, v, F["body"], colw - kw - 6 * f), font=F["body"], fill=C[vc])
-        y += 3 * 22 * f + 2 * f
-        d.text((pad, y), ellipsize(d, footer, F["small"], self.W - 2 * pad), font=F["small"], fill=C["muted"])
+            d.text((pad, y), "No replies yet", font=F["body"], fill=C["muted"])
+        y += 24 * f
+
+        # grouped stats: context, work, time
+        d.line([(pad, y), (W - pad, y)], fill=C["line"], width=max(1, round(f)))
+        y += 10 * f
+        cache = tot["cache"]
+        cstyle = "n" if cache is None or cache >= 0.8 else "warn" if cache >= 0.5 else "crit"
+        calls = sum(st.tools.values())
+        estyle = "warn" if calls and st.errors / calls > 0.1 else "n"
+        sep = " · "
+        rows = [
+            ("", [("–" if cache is None else f"{cache:.0%}", cstyle), (" cache" + sep, "u"),
+                        (str(s.compactions), "n"), (" " + plural(s.compactions, "compact") + sep, "u"),
+                        (str(tot["calls"]), "n"), (" " + plural(tot["calls"], "call"), "u")]),
+            ("", [(str(calls), "n"), (" " + plural(calls, "tool") + sep, "u"), (str(st.errors), estyle),
+                        (" " + plural(st.errors, "error") + sep, "u"), (str(len(st.files)), "n"),
+                        (" " + plural(len(st.files), "file"), "u")]),
+        ]
+        time_row = []
+        if st.started and s.mtime:
+            time_row += [(fmt_dur(s.mtime - st.started), "n"), (sep, "u")]
+        if st.last_prompt:
+            since = now - st.last_prompt
+            time_row += ([("just now", "n")] if since < 60 else [("asked ", "u"), (fmt_dur(since), "n"), (" ago", "u")])
+            time_row += [(sep, "u")]
+        time_row += [(str(st.prompts), "n"), (" " + plural(st.prompts, "prompt"), "u")]
+        rows.append(("", time_row))
+        for icon, parts in rows:
+            d.text((pad, y + 2 * f), icon, font=F["icon"], fill=C["muted"])
+            self.runs(d, pad + 22 * f, y, parts)
+            y += 22 * f
+        y += pad - 6 * f
+        img = img.crop((0, 0, W, round(y)))
+        d = ImageDraw.Draw(img)
+        d.rectangle([0, 0, W - 1, img.height - 1], outline=C["line"])
         return img
 
+    def runs(self, d, x, y, parts):
+        """Left-to-right text runs: numbers bold in ink (or warn/crit), words muted. Stops at the edge."""
+        F = self.fonts
+        for text, style in parts:
+            if style == "u":
+                fnt, color = F["body"], C["muted"]
+            else:
+                fnt, color = F["num"], C["ink"] if style == "n" else C[style]
+            w = d.textlength(text, font=fnt)
+            if x + w > self.W - self.pad:
+                return
+            d.text((x, y), text, font=fnt, fill=color)
+            x += w
+
+    def sparkline(self, img, x0, y0, w, h, series, col):
+        """Context per API call: filled area, dashed average, dot on the peak."""
+        f = self.f
+        if len(series) > w:  # one point per pixel is plenty; keep each bucket's max so peaks survive
+            step = len(series) / w
+            series = [max(series[int(i * step):max(int(i * step) + 1, int((i + 1) * step))]) for i in range(int(w))]
+        top = max(series) * 1.12 or 1
+        pts = [(x0 + w * i / (len(series) - 1), y0 + h - h * v / top) for i, v in enumerate(series)]
+        layer = Image.new("RGBA", img.size)
+        ImageDraw.Draw(layer).polygon([(x0, y0 + h)] + pts + [(x0 + w, y0 + h)], fill=rgb(col) + (52,))
+        img.alpha_composite(layer)
+        d = ImageDraw.Draw(img)
+        d.line(pts, fill=col, width=max(1, round(1.4 * f)), joint="curve")
+        avg = self.session.stats.totals["avg"]
+        ay = y0 + h - h * avg / top
+        x = x0
+        while x < x0 + w:
+            d.line([(x, ay), (min(x + 4 * f, x0 + w), ay)], fill=C["muted"], width=max(1, round(f)))
+            x += 8 * f
+        i = max(range(len(series)), key=series.__getitem__)
+        px, py = pts[i]
+        r = 3 * f
+        d.ellipse([px - r, py - r, px + r, py + r], fill=C["ink"], outline=C["panel"], width=max(1, round(f)))
+
     def draw_button(self, d, y):
+        """Round ✂ compact button at the right of the status line. Returns its left edge."""
         f, F = self.f, self.fonts
         busy = self.phase in ("compacting", "pruned", "watering")
-        text = "Cancel" if self.phase == "armed" else "Compact"
-        tw = d.textlength(text, font=F["button"])
-        w, h = tw + 34 * f, 20 * f
-        x1 = self.W - self.pad
-        x0 = x1 - w
+        armed = self.phase == "armed"
+        bd = 26 * f
+        x0 = self.W - self.pad - bd
         if not busy:
-            self.hits.append(((x0, y, x1, y + h), "compact", None))
-        fg = C["muted"] if busy else C["ink"]
-        fill = C["line"] if (self.hover_key == ("compact", None) and not busy) else None
-        d.rounded_rectangle([x0, y, x1, y + h], radius=h / 2, fill=fill, outline=C["line"] if busy else C["muted"],
-                            width=max(1, round(f)))
-        d.text((x0 + 10 * f, y + 1.5 * f), "✂", font=F["symbol"], fill=C["crit"] if not busy else fg)
-        d.text((x0 + 26 * f, y + 2.5 * f), text, font=F["button"], fill=fg)
+            self.hits.append(((x0, y, x0 + bd, y + bd), "compact", None))
+        hovered = self.hover_key == ("compact", None) and not busy
+        d.ellipse([x0, y, x0 + bd, y + bd], fill=C["line"] if hovered else None,
+                  outline=C["line"] if busy else (C["warn"] if armed else C["muted"]), width=max(1, round(f)))
+        glyph = "✕" if armed else "✂"
+        gw = d.textlength(glyph, font=F["symbol"])
+        d.text((x0 + (bd - gw) / 2, y + 4 * f), glyph, font=F["symbol"],
+               fill=C["muted"] if busy else (C["warn"] if armed else C["crit"]))
+        return x0
 
     # --- interaction ---
     def hit_at(self, x, y):
@@ -1506,7 +1616,7 @@ class Widget:
     def change_theme(self):
         self.cfg["theme"] = self.themevar.get()
         set_theme(self.cfg["theme"])
-        self.scene = Scene(self.W - 2 * self.pad)  # background is cached per theme
+        self.make_scenes()  # backgrounds are cached per theme
         self.grove_scene, self.grove_cache = None, {}
         self.tree_key = None
         self.root.configure(bg=C["panel"])
