@@ -88,14 +88,105 @@ THEMES = {
             "ok": "#3F4A3A", "warn": "#9A6A2E", "crit": "#B8322A"},
         "stops": [(0, 95, 14, 42), (0.5, 100, 10, 30), (0.7, 110, 8, 22), (0.8, 28, 32, 30),
                   (0.9, 10, 62, 40), (1.0, 4, 72, 42)]},
+    "Canyon": {
+        "colors": {
+            "panel": "#2A1D18", "wall": "#2E1F19", "wall2": "#3B2820", "ink": "#F1E4D8", "muted": "#B39A88",
+            "line": "#4A3429", "pot": "#B5603A", "potDark": "#8A4528", "potHi": "#D88A63", "wood": "#6E4E3A",
+            "woodDark": "#4E3628", "soil": "#2B1C15", "moss": "#6F7A4A", "bark": "#8A6A55", "barkHi": "#A88468",
+            "ok": "#A3B86C", "warn": "#E2A04A", "crit": "#E06A4A"},
+        "stops": [(0, 100, 30, 46), (0.5, 92, 22, 52), (0.7, 70, 22, 56), (0.8, 38, 52, 52),
+                  (0.9, 22, 64, 48), (1.0, 10, 68, 44)]},
+    "Clay": {
+        "colors": {
+            "panel": "#F5EFE6", "wall": "#F2EADF", "wall2": "#E7DCCB", "ink": "#2B2420", "muted": "#7A6D62",
+            "line": "#DCCFBD", "pot": "#C96442", "potDark": "#9E4A30", "potHi": "#E08A6C", "wood": "#8B6B4E",
+            "woodDark": "#6B5038", "soil": "#3B2E25", "moss": "#7E8A55", "bark": "#5C4636", "barkHi": "#7D6250",
+            "ok": "#5E7D3A", "warn": "#B7791F", "crit": "#B5452E"},
+        "stops": [(0, 82, 34, 42), (0.5, 88, 30, 35), (0.7, 96, 26, 30), (0.8, 40, 58, 44),
+                  (0.9, 22, 66, 44), (1.0, 12, 68, 40)]},
+    "Neon": {
+        "colors": {
+            "panel": "#140E24", "wall": "#120B22", "wall2": "#1E1336", "ink": "#F2E9FF", "muted": "#A08BC8",
+            "line": "#2E2350", "pot": "#2B1F55", "potDark": "#1C143A", "potHi": "#7B5CFF", "wood": "#2A2245",
+            "woodDark": "#1B1630", "soil": "#120D1F", "moss": "#3B2A6B", "bark": "#6B5B9A", "barkHi": "#8F7FD0",
+            "ok": "#4DF0FF", "warn": "#FFD84D", "crit": "#FF4D8D"},
+        "stops": [(0, 186, 95, 60), (0.5, 205, 90, 62), (0.7, 268, 88, 68), (0.8, 305, 90, 64),
+                  (0.9, 332, 95, 62), (1.0, 350, 95, 60)]},
+    "Pixel": {  # Moss colors, drawn at low resolution and scaled up without smoothing
+        "pixel": True,
+        "colors": {
+            "panel": "#1A201F", "wall": "#151A19", "wall2": "#1D2422", "ink": "#E3E7E0", "muted": "#9AA39B",
+            "line": "#2F3835", "pot": "#4E8990", "potDark": "#33616A", "potHi": "#78AEB4", "wood": "#7A5A40",
+            "woodDark": "#59402D", "soil": "#2A221C", "moss": "#5E7A40", "bark": "#7A6552", "barkHi": "#9C8469",
+            "ok": "#8DBA6E", "warn": "#E0A94A", "crit": "#E7795A"},
+        "stops": [(0, 104, 52, 52), (0.5, 120, 48, 42), (0.7, 130, 44, 36), (0.8, 52, 74, 52),
+                  (0.9, 26, 78, 50), (1.0, 8, 70, 46)]},
 }
+# Virtual themes resolve to a real palette each time they're applied.
+SEASONS = {12: "Midnight", 1: "Midnight", 2: "Midnight", 3: "Sakura", 4: "Sakura", 5: "Sakura",
+           6: "Moss", 7: "Moss", 8: "Moss", 9: "Canyon", 10: "Canyon", 11: "Canyon"}
+THEME_NAMES = ["Auto", "Seasons"] + list(THEMES)
 C = {}
 STOPS = []
+THEME_KEY = None  # identity of the applied palette, for caching scene backgrounds
+PIXEL = False
+
+
+def windows_theme():
+    """(light mode?, accent '#rrggbb') from the Windows personalization settings."""
+    light, accent = False, "#0078D4"
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as k:
+            light = winreg.QueryValueEx(k, "AppsUseLightTheme")[0] == 1
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\DWM") as k:
+            abgr = winreg.QueryValueEx(k, "AccentColor")[0]
+            accent = "#{:02X}{:02X}{:02X}".format(abgr & 0xFF, (abgr >> 8) & 0xFF, (abgr >> 16) & 0xFF)
+    except OSError:
+        pass
+    return light, accent
+
+
+def shade(hexstr, factor):
+    """Lighten (factor > 1) or darken (factor < 1) a color."""
+    h = hexstr.lstrip("#")
+    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    if factor >= 1:
+        r, g, b = (round(c + (255 - c) * (factor - 1)) for c in (r, g, b))
+    else:
+        r, g, b = (round(c * factor) for c in (r, g, b))
+    return "#{:02X}{:02X}{:02X}".format(*(min(255, max(0, c)) for c in (r, g, b)))
+
+
+def fluent_theme(light, accent):
+    """Windows 11 neutrals with the system accent on the pot."""
+    if light:
+        colors = {"panel": "#F3F3F3", "wall": "#FAFAFA", "wall2": "#EAEAEA", "ink": "#1B1B1B", "muted": "#5F5F5F",
+                  "line": "#D5D5D5", "ok": "#0F7B0F", "warn": "#9D5D00", "crit": "#C42B1C"}
+        stops = THEMES["Paper"]["stops"]
+    else:
+        colors = {"panel": "#202020", "wall": "#1C1C1C", "wall2": "#2B2B2B", "ink": "#FFFFFF", "muted": "#A0A0A0",
+                  "line": "#3A3A3A", "ok": "#6CCB5F", "warn": "#FCE100", "crit": "#FF99A4"}
+        stops = THEMES["Moss"]["stops"]
+    base = THEMES["Paper" if light else "Moss"]["colors"]
+    colors.update({k: base[k] for k in ("wood", "woodDark", "soil", "moss", "bark", "barkHi")})
+    colors.update({"pot": accent, "potDark": shade(accent, 0.7), "potHi": shade(accent, 1.35)})
+    return {"colors": colors, "stops": stops}
 
 
 def set_theme(name):
-    global STOPS
-    theme = THEMES.get(name) or THEMES["Moss"]
+    global STOPS, THEME_KEY, PIXEL
+    if name == "Auto":
+        light, accent = windows_theme()
+        key, theme = f"Auto-{'light' if light else 'dark'}-{accent}", fluent_theme(light, accent)
+    else:
+        if name == "Seasons":
+            name = SEASONS[time.localtime().tm_mon]
+        key, theme = name, THEMES.get(name) or THEMES["Moss"]
+    if key == THEME_KEY:
+        return
+    THEME_KEY, PIXEL = key, bool(theme.get("pixel"))
     C.clear()
     C.update(theme["colors"])
     STOPS = theme["stops"]
@@ -287,16 +378,18 @@ class Scene:
         self.k = width / (self.crop[2] - self.crop[0])  # virtual units -> output pixels
         self.w = width
         self.h = round((self.crop[3] - self.crop[1]) * self.k)
+        self.pixel = PIXEL
+        self.ss = 0.34 if PIXEL else SS  # pixel style draws small, then scales up without smoothing
         self.bg = self._background()
 
     def P(self, x, y):
-        return ((x - self.crop[0]) * self.k * SS, (y - self.crop[1]) * self.k * SS)
+        return ((x - self.crop[0]) * self.k * self.ss, (y - self.crop[1]) * self.k * self.ss)
 
     def L(self, v):
-        return v * self.k * SS
+        return v * self.k * self.ss
 
     def _background(self):
-        W, H = self.w * SS, self.h * SS
+        W, H = max(1, round(self.w * self.ss)), max(1, round(self.h * self.ss))
         img = Image.new("RGBA", (W, H))
         d = ImageDraw.Draw(img)
         a, b = rgb(C["wall"]), rgb(C["wall2"])
@@ -353,7 +446,7 @@ class Scene:
         for (px, py) in (a, b):  # round caps
             d.ellipse([px - r, py - r, px + r, py + r], fill=fill)
 
-    def render(self, g, cc, pile, tree=None):
+    def render(self, g, cc, pile, tree=None, sway=None):
         tree = tree or TREE
         img = self.bg.copy()
         d = ImageDraw.Draw(img)
@@ -388,18 +481,25 @@ class Scene:
             pts = [self.P(sh["x"], sh["y"])] + [self.P(*shoot_point(sh, i / 12 * f)) for i in range(1, 13)]
             d.line(pts, fill=C["bark"], width=max(1, round(self.L(1.5))), joint="curve")
         # soft canopy shadows on their own layer
-        shade = Image.new("RGBA", img.size)
-        sd = ImageDraw.Draw(shade)
+        def drift(x, y):  # breeze: leaves higher up sway further, neighbors slightly out of step
+            if sway is None:
+                return 0.0
+            return 2.4 * math.sin(sway + x * 0.025 + y * 0.02) * clamp((398 - y) / 260, 0, 1.2)
+
+        shadow = Image.new("RGBA", img.size)
+        sd = ImageDraw.Draw(shadow)
         lush = lushness(g)
         for p in tree["pads"]:
             f = clamp((g - p["birth"]) / 0.12, 0, 1)
             if f > 0:
                 R = p["size"] * lush * (0.45 + 0.55 * f)
-                self.ellipse(sd, p["x"], p["y"] - R * 0.12, R * 1.02, R * 0.5, leaf_color(g, 56))
-        img.alpha_composite(shade)
+                self.ellipse(sd, p["x"] + drift(p["x"], p["y"]), p["y"] - R * 0.12, R * 1.02, R * 0.5,
+                             leaf_color(g, 56))
+        img.alpha_composite(shadow)
         for x, y, s, rot, gl, _ in each_leaf(g, tree):
-            self.leaf(d, x, y, s, rot, leaf_color(gl, 255))
-        return img.resize((self.w, self.h), Image.LANCZOS)
+            self.leaf(d, x + drift(x, y), y, s, rot + (drift(x, y) * 0.06 if sway is not None else 0),
+                      leaf_color(gl, 255))
+        return img.resize((self.w, self.h), Image.NEAREST if self.pixel else Image.LANCZOS)
 
 
 # ---------- session data ----------
@@ -742,8 +842,8 @@ class Widget:
         self.resume_follow = False
         self.view = "focus"  # "focus" = one full card, "grove" = a tree per active session
         self._empty = Session(self.cfg, path="")
-        self.grove_scene = None
         self.grove_cache = {}
+        self.chrome = self.cfg["theme"]
         self.hits = []  # clickable regions from the last draw: (rect, action, arg)
         self.hover_key = None
         self._action = None
@@ -773,7 +873,16 @@ class Widget:
         self.caption = None  # (text, color key, until)
         self.preview = False
         self.shears = {"x": 470.0, "y": 110.0, "tx": 470.0, "ty": 110.0, "next": 0, "snip_at": None, "snap": 0}
+        self.edge, self.edge_i = [], 0
+        self.can_at = 0
         self.leaf_cache = (None, [])
+        self.sway_cache = {}
+        self.card = None  # (key, image) of the last full session card, reused by ambient frames
+        self.card_scene = (0, "#000000")
+        self.amb = []  # ambient particles: motes in the breeze, fireflies at night
+        self.tint = ((255, 255, 255), 0.0)
+        self.next_mote = self.next_leaf = 0
+        self.dt = 50
         try:
             self.signal_seen = os.path.getmtime(SIGNAL)
         except OSError:
@@ -797,8 +906,10 @@ class Widget:
         self.label.bind("<Button-3>", self.menu)
         self.topvar = tk.BooleanVar(value=self.cfg["topmost"])
         self.pinvar = tk.BooleanVar(value=bool(self.cfg.get("pinned")))
-        self.themevar = tk.StringVar(value=self.cfg["theme"] if self.cfg["theme"] in THEMES else "Moss")
+        self.themevar = tk.StringVar(value=self.cfg["theme"] if self.cfg["theme"] in THEME_NAMES else "Moss")
         self.zenvar = tk.BooleanVar(value=bool(self.cfg.get("zen")))
+        self.ambvar = tk.BooleanVar(value=self.cfg.get("ambient", True))
+        self.projvar = tk.StringVar(value="")
 
         self.refresh_sessions()
         if len(self.order) > 1:
@@ -942,6 +1053,8 @@ class Widget:
 
     def set_phase(self, phase):
         self.phase, self.phase_at = phase, time.time()
+        if phase == "compacting":
+            self.edge, self.edge_i = [], 0
         if phase != "idle":
             self.caption = None
 
@@ -958,12 +1071,13 @@ class Widget:
         self.tween = (frm, to, time.time() + 0.2, 0.9)
 
     def water(self, msg):
-        """Rehydrate: rain onto the soil, ripples, then new buds open across the canopy."""
+        """Rehydrate: a watering can tips in and pours onto the soil, ripples, then new buds open."""
         self.set_phase("watering")
         self.pending_restore = None
-        for i in range(28):
-            self.particles.append({"kind": "drop", "x": lerp(205, 395, random.random()), "y": 60 + random.random() * 90,
-                                   "vy": 4 + random.random() * 2, "life": 1.0, "wait": i * 45 + random.random() * 80})
+        self.can_at = time.time()
+        for i in range(30):  # positioned at the spout when they appear
+            self.particles.append({"kind": "pour", "x": None, "y": None, "vx": -(0.15 + random.random() * 0.08),
+                                   "vy": random.random() * 0.03, "life": 1.0, "wait": 450 + i * 55})
         leaves = list(each_leaf(min(1.0, max(self.session.g, BASELINE) + 0.15), self.session.tree))  # next growth
         for i, (x, y, *_r) in enumerate(random.sample(leaves, min(26, len(leaves)))):
             self.particles.append({"kind": "bud", "x": x, "y": y, "life": 1.0, "wait": 1300 + i * 55})
@@ -1018,9 +1132,130 @@ class Widget:
             self.leaf_cache = (key, list(each_leaf(g, self.session.tree)))
         return self.leaf_cache[1]
 
-    def tick(self):
-        dt = 50
+    # --- ambient: what the session is doing, shown in the scene ---
+    def ambient_on(self):
+        return self.cfg.get("ambient", True) and not (self.view == "grove" and len(self.order) > 1)
+
+    def working(self):
+        """Claude is mid-turn: the session's log changed in the last few seconds."""
+        s = self.session
+        return bool(s.path) and time.time() - s.mtime < 8
+
+    def sleeping(self):
+        s = self.session
+        return bool(s.path) and time.time() - s.mtime > 1800
+
+    def sky(self):
+        """Target tint over the scene: (rgb, alpha), from the clock, deeper when the session sleeps."""
+        if self.sleeping():
+            return (10, 14, 36), 0.4
+        lt = time.localtime()
+        h = lt.tm_hour + lt.tm_min / 60
+        if 5 <= h < 8:
+            return (255, 160, 110), 0.12 * (1 - abs(h - 6.5) / 1.5)
+        if 8 <= h < 17:
+            return (255, 255, 255), 0.0
+        if 17 <= h < 19:
+            return (255, 130, 70), 0.10 * (h - 17) / 2
+        if 19 <= h < 21:
+            t = (h - 19) / 2
+            return tuple(round(lerp(a, b, t)) for a, b in zip((255, 130, 70), (25, 35, 80))), lerp(0.10, 0.22, t)
+        return (25, 35, 80), 0.22
+
+    def night(self):
+        h = time.localtime().tm_hour
+        return self.sleeping() or h >= 21 or h < 5
+
+    def update_ambient(self, dt):
+        """Returns True while something in the ambience is moving."""
+        if not self.ambient_on():
+            self.amb = []
+            return False
         now = time.time()
+        rgb_t, a_t = self.sky()
+        c, a = self.tint
+        a2 = a + (a_t - a) * 0.08
+        c2 = tuple(round(lerp(x, y, 0.08)) for x, y in zip(c, rgb_t))
+        moving = abs(a2 - a) > 0.002
+        self.tint = (c2, a2)
+        working, sleeping = self.working(), self.sleeping()
+        top = self.scene.crop[1]
+        if working and self.phase == "idle" and now >= self.next_mote:  # drifting motes in the breeze
+            self.next_mote = now + 0.25 + random.random() * 0.25
+            self.amb.append({"kind": "mote", "x": self.scene.crop[0] - 4, "y": random.uniform(top + 40, 380),
+                             "vx": 0.04 + random.random() * 0.05, "ph": random.random() * TAU, "life": 1.0})
+        flies = [p for p in self.amb if p["kind"] == "fly"]
+        if sleeping and len(flies) < 7:
+            self.amb.append({"kind": "fly", "x": random.uniform(160, 440), "y": random.uniform(140, 380),
+                             "vx": 0.0, "vy": 0.0, "ph": random.random() * TAU, "life": 1.0})
+        for p in self.amb:
+            if p["kind"] == "mote":
+                p["x"] += p["vx"] * dt
+                p["y"] += math.sin(p["ph"] + p["x"] * 0.03) * 0.012 * dt
+                if p["x"] > self.scene.crop[2] + 4:
+                    p["life"] = 0
+            else:  # fireflies wander and fade out once the session wakes
+                p["vx"] = clamp(p["vx"] + random.uniform(-0.002, 0.002) * dt, -0.03, 0.03)
+                p["vy"] = clamp(p["vy"] + random.uniform(-0.002, 0.002) * dt, -0.03, 0.03)
+                p["x"], p["y"] = p["x"] + p["vx"] * dt, p["y"] + p["vy"] * dt
+                if not 130 < p["x"] < 470:
+                    p["vx"] = -p["vx"]
+                if not 110 < p["y"] < 390:
+                    p["vy"] = -p["vy"]
+                if not sleeping:
+                    p["life"] -= dt / 1500
+        self.amb = [p for p in self.amb if p["life"] > 0]
+        # while waiting on you, an occasional single leaf lets go
+        if not working and not sleeping and self.phase == "idle" and self.g > 0.2 and now >= self.next_leaf:
+            self.next_leaf = now + 9 + random.random() * 8
+            pool = self.leaves_at(self.g)
+            if pool:
+                x, y, s, rot, gl, _ = random.choice(pool)
+                self.spawn(x, y, s, rot, leaf_color(gl), burst=False)
+        return moving or bool(self.amb) or working
+
+    def spout(self):
+        """Watering can pivot, tilt and spout tip, in scene units."""
+        t = time.time() - self.can_at
+        if t < 0.4:
+            tilt = -0.6 * (1 - (1 - t / 0.4) ** 2)
+        elif t < 2.5:
+            tilt = -0.6
+        else:
+            tilt = -0.6 * max(0.0, 1 - (t - 2.5) / 0.5)
+        px, py = 482, self.scene.crop[1] + 46
+        sx, sy = -40 * 1.5, -16 * 1.5
+        return px, py, tilt, (px + sx * math.cos(tilt) - sy * math.sin(tilt), py + sx * math.sin(tilt) + sy * math.cos(tilt))
+
+    def canopy_edge(self):
+        """Outer leaves from left to right over the top, for the shears to work along."""
+        pool = self.leaves_at(self.g)
+        if not pool:
+            return []
+        cx = sum(l[0] for l in pool) / len(pool)
+        cy = sum(l[1] for l in pool) / len(pool)
+        far = {}
+        for l in pool:
+            a = math.atan2(l[1] - cy, l[0] - cx)  # screen y points down: the top half is negative
+            if a > math.pi - 0.35:
+                a -= TAU  # just below horizontal on the left counts as the start of the sweep
+            if a > 0.35:
+                continue  # skip the underside
+            b = int((a + math.pi + 0.35) * 8)
+            d2 = (l[0] - cx) ** 2 + (l[1] - cy) ** 2
+            if b not in far or d2 > far[b][0]:
+                far[b] = (d2, l)
+        return [far[b][1] for b in sorted(far)]  # left -> over the top -> right
+
+    def tick(self):
+        try:
+            self.animate()
+        finally:  # an error in one frame must not stop the animation loop
+            self.root.after(self.dt, self.tick)
+
+    def animate(self):
+        now = time.time()
+        dt = self.dt
         active = self.phase in ("armed", "compacting")
         if self.tween:
             frm, to, t0, dur = self.tween
@@ -1034,9 +1269,11 @@ class Widget:
         sh = self.shears
         if self.phase == "compacting":
             if now >= sh["next"]:
-                pool = self.leaves_at(self.g)
-                if pool:
-                    x, y, *_r = random.choice(pool)
+                if not self.edge:
+                    self.edge, self.edge_i = self.canopy_edge(), 0
+                if self.edge:  # work along the canopy edge, left to right over the top
+                    x, y, *_r = self.edge[self.edge_i % len(self.edge)]
+                    self.edge_i += 2
                     sh["tx"], sh["ty"] = x + 30, y - 24  # pivot up-right so the blade tips reach the leaf
                 sh["next"], sh["snip_at"] = now + 1.1, now + 0.6
             if sh["snip_at"] and now >= sh["snip_at"]:
@@ -1056,6 +1293,7 @@ class Widget:
                 if pool:
                     x, y, s, rot, gl, _ = random.choice(pool)
                     self.spawn(x, y, s, rot, leaf_color(gl), burst=False)
+        ambient_moving = self.update_ambient(dt)
         for p in self.particles:
             if p.get("wait", 0) > 0:
                 p["wait"] -= dt
@@ -1077,28 +1315,66 @@ class Widget:
                 p["y"] += p["vy"] * dt / 16
                 if p["y"] >= 395:
                     p["kind"], p["y"], p["life"] = "ripple", 396, 1.0
+            elif kind == "pour":  # from the can's spout, arcing down onto the soil
+                if p["x"] is None:
+                    p["x"], p["y"] = self.spout()[3]
+                p["vy"] += 0.00145 * dt
+                p["x"] += p["vx"] * dt
+                p["y"] += p["vy"] * dt
+                if p["y"] >= 395:
+                    p["kind"], p["y"], p["life"] = "ripple", 396, 1.0
             elif kind == "ripple":
                 p["life"] -= dt / 650
             elif kind == "bud":
                 p["life"] -= dt / 1100
         self.particles = [p for p in self.particles if p["life"] > 0]
-        if active or self.particles:
-            self.draw()
-        self.root.after(dt, self.tick)
+        can_out = self.phase == "watering" or now - self.can_at < 3.2
+        busy = active or self.particles or can_out
+        if busy or ambient_moving:
+            self.draw(scene_only=not busy)
+        # full speed for compaction effects, a calmer pace for ambience, slow polling otherwise
+        self.dt = 50 if busy else (250 if self.sleeping() else 125) if ambient_moving else 250
 
     # --- drawing ---
     def make_scenes(self):
-        # the card's scene runs edge to edge with headroom above the canopy for the % readout
-        self.scenes = {"card": Scene(self.W, FOCUS_CROP), "zen": Scene(self.W - 2 * self.pad, CROP)}
-        self.scene = self.scenes["card"]
+        self.scene_cache = {}
         self.tree_key = None
+        self.scene = self.get_scene("card")
+
+    def get_scene(self, kind, width=None):
+        """Scene backgrounds are cached per palette, so each theme in use keeps its own."""
+        if kind == "card":  # edge to edge, with headroom above the canopy for the % readout
+            width, crop = self.W, FOCUS_CROP
+        elif kind == "zen":
+            width, crop = self.W - 2 * self.pad, CROP
+        else:
+            crop = GROVE_CROP
+        key = (THEME_KEY, kind, width)
+        if key not in self.scene_cache:
+            self.scene_cache[key] = Scene(width, crop)
+        return self.scene_cache[key]
+
+    def theme_for(self, s):
+        """A project's own theme if one is set for it, otherwise the widget's theme."""
+        per = self.cfg.get("project_themes") or {}
+        return per.get(s.name.lower()) or self.cfg["theme"]
 
     def tree(self):
         s = self.session
-        key = (id(self.scene), s.path, round(self.g, 3), s.compactions, len(self.pile))
+        sway = None
+        if self.ambient_on() and self.working() and self.phase == "idle" and not self.tween:
+            frame = int(time.time() * 7) % 8  # a looping 8-frame breeze, rendered on demand
+            sway = frame / 8 * TAU
+        key = (id(self.scene), s.path, round(self.g, 3), s.compactions, len(self.pile), sway)
         if key != self.tree_key:
-            self.tree_key = key
-            self.tree_img = self.scene.render(self.g, s.compactions, self.pile, s.tree)
+            cached = self.sway_cache.get(key)
+            if cached is None:
+                cached = self.scene.render(self.g, s.compactions, self.pile, s.tree, sway)
+                if sway is not None:
+                    if len(self.sway_cache) > 24:
+                        self.sway_cache.clear()
+                    self.sway_cache[key] = cached
+            self.tree_key, self.tree_img = key, cached
         return self.tree_img
 
     def V(self, x, y):
@@ -1112,8 +1388,10 @@ class Widget:
         d = ImageDraw.Draw(layer)
         k = self.scene.k
         water = (62, 143, 192) if is_light() else (124, 196, 232)
+        if self.ambient_on():
+            self.draw_ambient(d, size)
         for p in self.particles:
-            if p.get("wait", 0) > 0:
+            if p.get("wait", 0) > 0 or p.get("x") is None:
                 continue
             a = int(255 * clamp(p["life"], 0, 1))
             if p["kind"] == "leaf":
@@ -1124,7 +1402,7 @@ class Widget:
                     ex, ey = math.cos(t) * 4.4 * p["s"], math.sin(t) * 2.4 * p["s"]
                     pts.append(self.V(p["x"] + ex * ca - ey * sa, p["y"] + ex * sa + ey * ca))
                 d.polygon(pts, fill=p["color"][:3] + (a,))
-            elif p["kind"] == "drop":
+            elif p["kind"] in ("drop", "pour"):
                 x, y = self.V(p["x"], p["y"])
                 d.ellipse([x - 3 * k, y - 9 * k, x + 3 * k, y + 3 * k], fill=water + (235,))
             elif p["kind"] == "ripple":
@@ -1147,7 +1425,63 @@ class Widget:
             else:
                 opening = 0.22
             self.draw_shears(d, sh["x"], sh["y"], 2.5, opening)  # blades point down-left into the canopy
+        if self.phase == "watering" or time.time() - self.can_at < 3.2:
+            self.draw_can(d)
         return layer
+
+    def draw_ambient(self, d, size):
+        """Clock/sleep tint over the scene, the moon at night, fireflies, breeze motes."""
+        k = self.scene.k
+        (r, g, b), a = self.tint
+        if a > 0.003:
+            d.rectangle([0, 0, size[0], size[1]], fill=(r, g, b, int(255 * a)))
+        if self.night():
+            mx, my = self.V(self.scene.crop[2] - 72, self.scene.crop[1] + 52)
+            for rr, al in ((26, 18), (19, 34)):
+                d.ellipse([mx - rr * k, my - rr * k, mx + rr * k, my + rr * k], fill=(240, 236, 214, al))
+            rr = 12 * k
+            d.ellipse([mx - rr, my - rr, mx + rr, my + rr], fill=(240, 236, 214, 235))
+            for cx, cy, cr in ((-4, -3, 2.6), (3, 4, 1.8), (5, -4, 1.3)):  # craters
+                d.ellipse([mx + (cx - cr) * k, my + (cy - cr) * k, mx + (cx + cr) * k, my + (cy + cr) * k],
+                          fill=(214, 208, 184, 235))
+        now = time.time()
+        mote = (90, 96, 100) if is_light() else (232, 232, 214)
+        for p in self.amb:
+            x, y = self.V(p["x"], p["y"])
+            if p["kind"] == "mote":
+                rr = 2.0 * k
+                d.ellipse([x - rr * 2.2, y - rr * 2.2, x + rr * 2.2, y + rr * 2.2], fill=mote + (34,))
+                d.ellipse([x - rr, y - rr, x + rr, y + rr], fill=mote + (170,))
+            else:
+                glow = 0.5 + 0.5 * math.sin(now * 2.2 + p["ph"])
+                al = clamp(p["life"], 0, 1) * glow
+                for rr, f_ in ((7, 0.22), (3.5, 0.5), (1.6, 1.0)):
+                    d.ellipse([x - rr * k, y - rr * k, x + rr * k, y + rr * k], fill=(222, 246, 140, int(255 * al * f_)))
+
+    def draw_can(self, d):
+        """A watering can at the top right, tipping its spout down toward the pot."""
+        k = self.scene.k
+        px, py, tilt, _tip = self.spout()
+        s = 1.5
+        ca, sa = math.cos(tilt), math.sin(tilt)
+
+        def P(x, y):
+            return self.V(px + (x * ca - y * sa) * s, py + (x * sa + y * ca) * s)
+
+        light = is_light()
+        body = (128, 138, 144) if light else (176, 186, 192)
+        dark = (88, 96, 102) if light else (120, 130, 136)
+        d.polygon([P(-12, -4), P(-40, -18), P(-40, -13), P(-12, 4)], fill=dark)  # spout
+        hx, hy = P(-41, -15.5)
+        rr = 3.2 * s * k
+        d.ellipse([hx - rr, hy - rr, hx + rr, hy + rr], fill=dark)  # rose
+        d.polygon([P(-16, -12), P(18, -12), P(16, 13), P(-14, 13)], fill=body)  # body
+        d.line([P(-17, -12), P(19, -12)], fill=dark, width=max(1, round(2.4 * k)))  # rim
+        d.line([P(-15, 4), P(17, 4)], fill=rgb(C["pot"]), width=max(1, round(3.2 * k)))  # band
+        hc = P(24, 0)
+        rr = 9 * s * k
+        d.arc([hc[0] - rr, hc[1] - rr, hc[0] + rr, hc[1] + rr], start=-100 + math.degrees(tilt),
+              end=100 + math.degrees(tilt), fill=dark, width=max(2, round(2.6 * k)))  # handle
 
     def draw_shears(self, d, x, y, angle, opening):
         k = self.scene.k * 2.1  # shears are drawn larger than the tree's scale so they read at widget size
@@ -1169,13 +1503,31 @@ class Widget:
             d.polygon([(px + nx, py + ny), tip, (px - nx, py - ny)], fill=blade, outline=edge)
         d.ellipse([px - 2 * k, py - 2 * k, px + 2 * k, py + 2 * k], fill=handle, outline=edge)
 
-    def draw(self):
-        self.hits = []
-        self.scene = self.scenes["zen" if self.cfg.get("zen") else "card"]
-        if self.cfg.get("zen"):
-            img = self.render_zen()
+    def draw(self, scene_only=False):
+        grove = self.view == "grove" and len(self.order) > 1
+        # a session's card takes its project's theme; the grove's frame uses the widget theme
+        self.chrome = self.cfg["theme"] if grove else self.theme_for(self.session)
+        set_theme(self.chrome)
+        self.scene = self.get_scene("zen" if self.cfg.get("zen") else "card")
+        card_key = (THEME_KEY, self.focus_path, round(self.g, 3))
+        if (scene_only and not self.cfg.get("zen") and not grove and self.card
+                and self.card[0] == card_key):
+            img = self.card[1].copy()  # ambient frame: only the scene band changes
+            ty, col = self.card_scene
+            self.paint_scene(img, ty, self.g, col)
+            ImageDraw.Draw(img).rectangle([0, 0, img.width - 1, img.height - 1], outline=C["line"])
         else:
-            img = self.render_grove() if self.view == "grove" else self.render_focus()
+            self.hits = []
+            if self.cfg.get("zen"):
+                img = self.render_zen()
+            elif grove:
+                img = self.render_grove()
+            else:
+                img = self.render_focus()
+                self.card = (card_key, img)
+        if self.label.cget("bg") != C["panel"]:
+            self.root.configure(bg=C["panel"])
+            self.label.configure(bg=C["panel"])
         self.last_img = img
         self.frame_img = ImageTk.PhotoImage(img)
         self.label.configure(image=self.frame_img)
@@ -1196,6 +1548,17 @@ class Widget:
                                self.root.winfo_screenheight() - round(72 * self.f))
         self.root.geometry(f"+{int(self.anchor[0] - w)}+{int(self.anchor[1] - h)}")
 
+    def grove_tree(self, s, width):
+        """One grove tree in its session's theme (cached), leaving the frame's theme applied afterwards."""
+        set_theme(self.theme_for(s))
+        key = (THEME_KEY, width, round(s.g, 3), s.compactions)
+        cached = self.grove_cache.get(s.path)
+        if not cached or cached[0] != key:
+            img = self.get_scene("grove", width).render(s.g, s.compactions, [], s.tree)
+            cached = self.grove_cache[s.path] = (key, img)
+        set_theme(self.chrome)
+        return cached[1]
+
     def render_grove(self):
         f, F, pad = self.f, self.fonts, self.pad
         now = time.time()
@@ -1204,10 +1567,7 @@ class Widget:
         gap = 10 * f
         W = max(self.W, round(2 * pad + n * 104 * f + (n - 1) * gap))
         cell = (W - 2 * pad - (n - 1) * gap) / n
-        if self.grove_scene is None or self.grove_scene.w != int(cell):
-            self.grove_scene = Scene(int(cell), GROVE_CROP)
-            self.grove_cache = {}
-        scene = self.grove_scene
+        scene = self.get_scene("grove", int(cell))
         info_h = 8 * f + 16 * f + 14 * f + 22 * f + 10 * f + 14 * f  # title, project, %, meter, status
         H = round(pad + 30 * f + scene.h + info_h + 22 * f + pad)
         img = Image.new("RGBA", (W, H), C["panel"])
@@ -1225,11 +1585,8 @@ class Widget:
             self.hits.append((rect, "open", p))
             if self.hover_key == ("open", p):
                 d.rounded_rectangle(rect, radius=8 * f, fill=C["line"])
-            key = (round(g, 3), s.compactions)
-            cached = self.grove_cache.get(p)
-            if not cached or cached[0] != key:
-                cached = self.grove_cache[p] = (key, scene.render(g, s.compactions, [], s.tree))
-            img.paste(cached[1], (round(x), round(y0)), cached[1])
+            t = self.grove_tree(s, int(cell))
+            img.paste(t, (round(x), round(y0)), t)
             cx = x + cell / 2
             yy = y0 + scene.h + 8 * f
             name = ellipsize(d, s.title or s.name, F["small"], cell)
@@ -1260,20 +1617,14 @@ class Widget:
         m = round(6 * f)
         if self.view == "grove" and len(self.order) > 1:
             cell = int(110 * f)
-            if self.grove_scene is None or self.grove_scene.w != cell:
-                self.grove_scene = Scene(cell, GROVE_CROP)
-                self.grove_cache = {}
-            scene, n = self.grove_scene, len(self.order)
+            scene, n = self.get_scene("grove", cell), len(self.order)
             img = Image.new("RGBA", (2 * m + n * cell + (n - 1) * m, 2 * m + scene.h), C["panel"])
             d = ImageDraw.Draw(img)
             for i, p in enumerate(self.order):
                 s = self.sessions[p]
-                key = (round(s.g, 3), s.compactions)
-                cached = self.grove_cache.get(p)
-                if not cached or cached[0] != key:
-                    cached = self.grove_cache[p] = (key, scene.render(s.g, s.compactions, [], s.tree))
+                t = self.grove_tree(s, cell)
                 x = m + i * (cell + m)
-                img.paste(cached[1], (x, m), cached[1])
+                img.paste(t, (x, m), t)
                 self.hits.append(((x, m, x + cell, m + scene.h), "open", p))
                 if self.hover_key == ("open", p):
                     self.tag(d, x + 5 * f, m + 5 * f, f"{round(s.g * 100)}% · {s.title or s.name}", cell - 10 * f)
@@ -1316,9 +1667,7 @@ class Widget:
         if self.phase in PHASE_TEXT:
             label, state = PHASE_TEXT[self.phase]
         col = C[state]
-        tree = self.tree().copy()
-        tree.alpha_composite(self.overlay(tree.size))
-        img = Image.new("RGBA", (W, round(tree.height + 420 * f)), C["panel"])  # cropped to fit at the end
+        img = Image.new("RGBA", (W, round(self.scene.h + 420 * f)), C["panel"])  # cropped to fit at the end
         d = ImageDraw.Draw(img)
 
         # identity: session title, then project · branch · changes
@@ -1363,10 +1712,26 @@ class Widget:
             x += d.textlength(text, font=F["sub"])
         y = round(52 * f)
 
-        # hero: the tree edge to edge, readout on the wall, the shelf edge doubles as the meter
         ty = y
+        th = self.paint_scene(img, ty, g, col)
+        d = ImageDraw.Draw(img)
+        self.card_scene = (ty, col)
+        y = ty + th + 10 * f
+        return self.render_focus_lower(img, d, y, s, label, advice, col, now)
+
+    def paint_scene(self, img, ty, g, col):
+        """The tree edge to edge, readout on the wall, the shelf edge doubling as the meter.
+        Ambient frames repaint just this band over the last full card."""
+        s, f, F, pad, W = self.session, self.f, self.fonts, self.pad, self.W
+        now = time.time()
+        tree = self.tree().copy()
+        tree.alpha_composite(self.overlay(tree.size))
         img.paste(tree, (0, ty), tree)
-        halo = {"stroke_width": max(1, round(3 * f)), "stroke_fill": C["wall"]}
+        d = ImageDraw.Draw(img)
+        wall = rgb(C["wall"])
+        if self.ambient_on() and self.tint[1] > 0.003:  # match the tinted wall so the outline doesn't show
+            wall = tuple(round(lerp(c, t, self.tint[1])) for c, t in zip(wall, self.tint[0]))
+        halo = {"stroke_width": max(1, round(3 * f)), "stroke_fill": wall}
         pct = f"{round(g * 100)}%"
         d.text((pad, ty + 2 * f), pct, font=F["light"], fill=C["ink"], **halo)
         pw = d.textlength(pct, font=F["light"])
@@ -1388,8 +1753,10 @@ class Widget:
             d.rectangle([0, shelf - mh / 2, W * clamp(g, 0, 1), shelf + mh / 2], fill=col)
             tx = W * 0.85
             d.rectangle([tx - f, shelf - 5 * f, tx + f, shelf + 5 * f], fill=C["muted"])
-        y = ty + tree.height + 10 * f
+        return tree.height
 
+    def render_focus_lower(self, img, d, y, s, label, advice, col, now):
+        f, F, pad, W = self.f, self.fonts, self.pad, self.W
         # status: stage (or compaction progress) and the compact button
         text, tcol = advice, "muted"
         if self.phase == "armed":
@@ -1594,10 +1961,25 @@ class Widget:
         m.add_checkbutton(label="Keep on top", variable=self.topvar, command=self.toggle_top)
         m.add_checkbutton(label="Pin this session", variable=self.pinvar, command=self.toggle_pin)
         themes = tk.Menu(m, tearoff=0)
-        for name in THEMES:
-            themes.add_radiobutton(label=name, value=name, variable=self.themevar, command=self.change_theme)
+        for name in THEME_NAMES:
+            label = {"Auto": "Auto (follows Windows)", "Seasons": "Seasons (changes with the date)"}.get(name, name)
+            themes.add_radiobutton(label=label, value=name, variable=self.themevar, command=self.change_theme)
+            if name == "Seasons":
+                themes.add_separator()
         m.add_cascade(label="Theme", menu=themes)
+        s = self.session
+        if s.cwd:  # a theme just for this session's project
+            per = self.cfg.get("project_themes") or {}
+            self.projvar.set(per.get(s.name.lower(), ""))
+            proj = tk.Menu(m, tearoff=0)
+            proj.add_radiobutton(label="Same as the widget", value="", variable=self.projvar,
+                                 command=self.change_project_theme)
+            proj.add_separator()
+            for name in THEME_NAMES:
+                proj.add_radiobutton(label=name, value=name, variable=self.projvar, command=self.change_project_theme)
+            m.add_cascade(label=f"Theme for {ellipsize_plain(s.name, 28)}", menu=proj)
         m.add_checkbutton(label="Zen mode", variable=self.zenvar, command=self.toggle_zen)
+        m.add_checkbutton(label="Ambient animation", variable=self.ambvar, command=self.toggle_ambient)
         if len(self.order) > 1 and self.view == "focus":
             m.add_command(label="Show grove", command=lambda: self.do("grove", None))
         if self.view == "focus" and self.phase in ("idle", "armed"):
@@ -1615,12 +1997,25 @@ class Widget:
 
     def change_theme(self):
         self.cfg["theme"] = self.themevar.get()
-        set_theme(self.cfg["theme"])
-        self.make_scenes()  # backgrounds are cached per theme
-        self.grove_scene, self.grove_cache = None, {}
-        self.tree_key = None
-        self.root.configure(bg=C["panel"])
-        self.label.configure(bg=C["panel"])
+        self.retheme()
+
+    def change_project_theme(self):
+        per = dict(self.cfg.get("project_themes") or {})
+        name = self.session.name.lower()
+        if self.projvar.get():
+            per[name] = self.projvar.get()
+        else:
+            per.pop(name, None)
+        self.cfg["project_themes"] = per
+        self.retheme()
+
+    def retheme(self):
+        self.grove_cache, self.sway_cache, self.tree_key = {}, {}, None
+        save_config(self.cfg)
+        self.draw()
+
+    def toggle_ambient(self):
+        self.cfg["ambient"] = self.ambvar.get()
         save_config(self.cfg)
         self.draw()
 
@@ -1654,6 +2049,10 @@ def focus_claude():
         user32.ShowWindow(hwnd, 9)  # SW_RESTORE
     user32.SetForegroundWindow(hwnd)
     return True
+
+
+def ellipsize_plain(text, n):
+    return text if len(text) <= n else text[:n - 1] + "…"
 
 
 def ellipsize(d, text, fnt, maxw):
