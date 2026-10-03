@@ -19,7 +19,7 @@ import tkinter as tk
 import zlib
 from datetime import datetime
 
-from PIL import Image, ImageDraw, ImageFont, ImageTk
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageTk
 
 HOME = os.path.expanduser("~")
 PROJECTS = os.path.join(HOME, ".claude", "projects")
@@ -321,7 +321,8 @@ def make_pile(count, seed):
     return out
 
 
-def leaf_color(g, alpha=255):
+def leaf_color(g, alpha=255, dl=0):
+    """Leaf color for a context fill level; dl shifts lightness (light from the top left)."""
     g = clamp(g, 0, 1)
     i = 0
     while i < len(STOPS) - 2 and g > STOPS[i + 1][0]:
@@ -329,7 +330,7 @@ def leaf_color(g, alpha=255):
     a, b = STOPS[i], STOPS[i + 1]
     t = clamp((g - a[0]) / (b[0] - a[0]), 0, 1)
     dh = (b[1] - a[1] + 540) % 360 - 180  # blend hue the short way round the color wheel
-    h, s, l = (a[1] + dh * t) % 360, lerp(a[2], b[2], t), lerp(a[3], b[3], t)
+    h, s, l = (a[1] + dh * t) % 360, lerp(a[2], b[2], t), clamp(lerp(a[3], b[3], t) + dl, 4, 96)
     rr, gg, bb = colorsys.hls_to_rgb(h / 360, l / 100, s / 100)
     return (int(rr * 255), int(gg * 255), int(bb * 255), alpha)
 
@@ -399,17 +400,35 @@ class Scene:
             d.line([(0, yy), (W, yy)], fill=tuple(int(lerp(a[i], b[i], t)) for i in range(3)))
         d.rectangle([0, shelf, W, H], fill=C["wall2"])
         d.rectangle([0, shelf, W, shelf + self.L(1.5)], fill=C["line"])
-        # stand
+        # stand: plank with a lit top edge, legs
         self.rect(d, 140, 446, 14, 10, C["woodDark"])
         self.rect(d, 446, 446, 14, 10, C["woodDark"])
         self.rect(d, 116, 438, 368, 10, C["wood"])
+        self.rect(d, 116, 438, 368, 1.6, shade(C["wood"], 1.3))
         self.rect(d, 116, 446, 368, 2, C["woodDark"])
-        # pot
-        self.rect(d, 190, 430, 22, 8, C["potDark"])
-        self.rect(d, 388, 430, 22, 8, C["potDark"])
-        d.polygon([self.P(172, 402), self.P(428, 402), self.P(412, 432), self.P(188, 432)], fill=C["pot"])
-        self.rect(d, 166, 396, 268, 8, C["potDark"])
-        self.rect(d, 180, 406, 240, 2, C["potHi"])
+        # the pot's soft shadow on the stand
+        sh = Image.new("RGBA", img.size)
+        self.ellipse(ImageDraw.Draw(sh), 306, 438.5, 142, 5, (0, 0, 0, 110 if is_light() else 150))
+        img.alpha_composite(sh.filter(ImageFilter.GaussianBlur(max(0.5, self.L(3.5)))))
+        d = ImageDraw.Draw(img)
+        # pot: feet, then a body lit from the left and shadowed on the right, rim with a highlight
+        self.rect(d, 192, 430, 22, 8, C["potDark"])
+        self.rect(d, 386, 430, 22, 8, C["potDark"])
+        hi, mid, lo = rgb(C["potHi"]), rgb(C["pot"]), rgb(C["potDark"])
+        xa, xb = self.P(172, 0)[0], self.P(428, 0)[0]
+        top, bot = self.P(0, 402)[1], self.P(0, 432)[1]
+        for px in range(int(xa), int(xb) + 1):
+            vx = self.crop[0] + px / (self.k * self.ss)
+            t = clamp((vx - 172) / 256, 0, 1)
+            col = (tuple(round(lerp(h, m, t / 0.3)) for h, m in zip(hi, mid)) if t < 0.3 else
+                   tuple(round(lerp(m, l, (t - 0.3) / 0.7)) for m, l in zip(mid, lo)))
+            # the sides slope in: 172 -> 188 at the bottom-left, 428 -> 412 at the bottom-right
+            edge = min(1.0, (vx - 172) / 16, (428 - vx) / 16)
+            yb = top + (bot - top) * clamp(edge if edge < 1 else 1, 0, 1) if edge < 1 else bot
+            d.line([(px, top), (px, yb)], fill=col)
+        self.rect(d, 180, 409, 240, 1.6, shade(C["pot"], 1.18))  # a thrown ring around the body
+        self.rect(d, 166, 395, 268, 9, C["potDark"])  # rim
+        self.rect(d, 168, 395.6, 264, 1.5, shade(C["potHi"], 1.15))
         self.rect(d, 176, 394, 248, 4, C["soil"])
         mr = mulberry(5)
         for _ in range(46):
@@ -446,6 +465,78 @@ class Scene:
         for (px, py) in (a, b):  # round caps
             d.ellipse([px - r, py - r, px + r, py + r], fill=fill)
 
+    def taper(self, d, x1, y1, x2, y2, w1, w2, fill):
+        """A branch that narrows from w1 to w2, with a rounded joint at its base."""
+        dx, dy = x2 - x1, y2 - y1
+        n = math.hypot(dx, dy) or 1e-6
+        nx, ny = -dy / n, dx / n
+        d.polygon([self.P(x1 + nx * w1 / 2, y1 + ny * w1 / 2), self.P(x2 + nx * w2 / 2, y2 + ny * w2 / 2),
+                   self.P(x2 - nx * w2 / 2, y2 - ny * w2 / 2), self.P(x1 - nx * w1 / 2, y1 - ny * w1 / 2)], fill=fill)
+        for (x, y), w in (((x1, y1), w1), ((x2, y2), w2)):
+            cx, cy = self.P(x, y)
+            r = max(0.5, self.L(w / 2))
+            d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=fill)
+
+    def trunk(self, d, tree, g, thick):
+        """A smooth, tapered trunk with a root flare, shaded from a light at the top left."""
+        segs = [s for s in tree["segs"] if s.get("trunk")]
+        pts, ws = [], []
+        for i, s in enumerate(segs):
+            p = clamp((g - s["birth"]) / s["dur"], 0, 1)
+            if p <= 0 and i > 0:
+                break
+            pp = max(p, 0.35) if i == 0 else p
+            if not pts:
+                pts.append((s["x1"], s["y1"]))
+                ws.append(s["w1"])
+            pts.append((lerp(s["x1"], s["x2"], pp), lerp(s["y1"], s["y2"], pp)))
+            ws.append(lerp(s["w1"], s["w2"], pp))
+            if p < 1:
+                break
+        wmul = thick * (0.55 + 0.45 * clamp(g / 0.5, 0, 1))
+
+        def cr(a, b, c, e, t):  # Catmull-Rom through the joints, so the trunk curves instead of kinking
+            return 0.5 * (2 * b + (c - a) * t + (2 * a - 5 * b + 4 * c - e) * t * t + (3 * b - a - 3 * c + e) * t ** 3)
+
+        line = []
+        for i in range(len(pts) - 1):
+            p0, p1, p2, p3 = pts[max(0, i - 1)], pts[i], pts[i + 1], pts[min(len(pts) - 1, i + 2)]
+            for k in range(8):
+                t = k / 8
+                line.append((cr(p0[0], p1[0], p2[0], p3[0], t), cr(p0[1], p1[1], p2[1], p3[1], t),
+                             lerp(ws[i], ws[i + 1], t)))
+        line.append((pts[-1][0], pts[-1][1], ws[-1]))
+        out = []
+        for j, (x, y, w) in enumerate(line):
+            u = j / max(1, len(line) - 1)
+            flare = 1 + 1.15 * max(0.0, 1 - u / 0.14) ** 2  # roots spreading into the soil
+            out.append((x, y, max(1.2, w * wmul * flare)))
+        right, left, nrm = [], [], []
+        for j, (x, y, w) in enumerate(out):
+            a, b = out[max(0, j - 1)], out[min(len(out) - 1, j + 1)]
+            tx, ty = b[0] - a[0], b[1] - a[1]
+            n = math.hypot(tx, ty) or 1e-6
+            nx, ny = -ty / n, tx / n  # points to screen-right while the trunk climbs
+            nrm.append((nx, ny))
+            right.append((x + nx * w / 2, y + ny * w / 2))
+            left.append((x - nx * w / 2, y - ny * w / 2))
+        P = self.P
+        d.polygon([P(*q) for q in right + left[::-1]], fill=C["bark"])
+        shaded = [(x + nx * w * 0.06, y + ny * w * 0.06) for (x, y, w), (nx, ny) in zip(out, nrm)]
+        d.polygon([P(*q) for q in shaded + right[::-1]], fill=shade(C["bark"], 0.8))
+        lit_a = [(x - nx * w * 0.36, y - ny * w * 0.36) for (x, y, w), (nx, ny) in zip(out, nrm)]
+        lit_b = [(x - nx * w * 0.16, y - ny * w * 0.16) for (x, y, w), (nx, ny) in zip(out, nrm)]
+        d.polygon([P(*q) for q in lit_a + lit_b[::-1]], fill=C["barkHi"])
+        fissure = shade(C["bark"], 0.68)  # bark texture: broken lines running along the trunk
+        for off, start in ((0.1, 2), (0.3, 5), (-0.05, 9)):
+            for j in range(start, len(out) - 3, 9):
+                run = [P(x + nx * w * off, y + ny * w * off) for (x, y, w), (nx, ny) in zip(out[j:j + 4], nrm[j:j + 4])]
+                d.line(run, fill=fissure, width=max(1, round(self.L(0.9))))
+        x, y, w = out[-1]
+        cx, cy = P(x, y)
+        r = self.L(w / 2)
+        d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=C["bark"])
+
     def render(self, g, cc, pile, tree=None, sway=None):
         tree = tree or TREE
         img = self.bg.copy()
@@ -458,47 +549,73 @@ class Scene:
             self.seg(d, tx, ty - 5, tx, ty + 2, 1.6, C["potHi"])
         for l in pile:
             self.leaf(d, l["x"], l["y"], l["s"], l["rot"], leaf_color(0.82 + l["hue"] * 0.2, 230))
-        thick = 1 + 0.08 * min(cc, 6)
-        for s in tree["segs"]:
-            first = s.get("trunk") and s["birth"] == 0
-            p = clamp((g - s["birth"]) / s["dur"], 0, 1)
-            if p <= 0 and not first:
-                continue
-            pp = max(p, 0.35) if first else p
-            x2, y2 = lerp(s["x1"], s["x2"], pp), lerp(s["y1"], s["y2"], pp)
-            if s.get("trunk"):
-                wmul = thick * (0.55 + 0.45 * clamp(g / 0.5, 0, 1))
-            else:
-                wmul = 0.6 + 0.4 * clamp(g / 0.6, 0, 1)
-            width = max(1.2, lerp(s["w1"], s["w2"], 0.5) * wmul)
-            self.seg(d, s["x1"], s["y1"], x2, y2, width, C["bark"])
-            if s.get("trunk"):
-                self.seg(d, s["x1"] - 3, s["y1"], x2 - 3, y2, max(1, width * 0.22), C["barkHi"])
-        for sh in tree["shoots"]:
-            f = clamp((g - sh["birth"]) / 0.08, 0, 1)
-            if f <= 0:
-                continue
-            pts = [self.P(sh["x"], sh["y"])] + [self.P(*shoot_point(sh, i / 12 * f)) for i in range(1, 13)]
-            d.line(pts, fill=C["bark"], width=max(1, round(self.L(1.5))), joint="curve")
-        # soft canopy shadows on their own layer
+
         def drift(x, y):  # breeze: leaves higher up sway further, neighbors slightly out of step
             if sway is None:
                 return 0.0
             return 2.4 * math.sin(sway + x * 0.025 + y * 0.02) * clamp((398 - y) / 260, 0, 1.2)
 
-        shadow = Image.new("RGBA", img.size)
-        sd = ImageDraw.Draw(shadow)
+        layer = Image.new("RGBA", img.size)  # the tree on its own layer, so it can cast a shadow
+        ld = ImageDraw.Draw(layer)
+        thick = 1 + 0.08 * min(cc, 6)
+        bwmul = 0.6 + 0.4 * clamp(g / 0.6, 0, 1)
+        for s in tree["segs"]:
+            if s.get("trunk"):
+                continue
+            p = clamp((g - s["birth"]) / s["dur"], 0, 1)
+            if p <= 0:
+                continue
+            x2, y2 = lerp(s["x1"], s["x2"], p), lerp(s["y1"], s["y2"], p)
+            w1 = max(1.2, s["w1"] * bwmul)
+            w2 = max(0.9, lerp(s["w1"], s["w2"], p) * bwmul)
+            self.taper(ld, s["x1"], s["y1"], x2, y2, w1, w2, C["bark"])
+        for sh in tree["shoots"]:
+            f = clamp((g - sh["birth"]) / 0.08, 0, 1)
+            if f <= 0:
+                continue
+            pts = [self.P(sh["x"], sh["y"])] + [self.P(*shoot_point(sh, i / 12 * f)) for i in range(1, 13)]
+            ld.line(pts, fill=C["bark"], width=max(1, round(self.L(1.5))), joint="curve")
+        self.trunk(ld, tree, g, thick)
+        # foliage: a darker dome under each pad, then leaves lit from the top left
         lush = lushness(g)
         for p in tree["pads"]:
             f = clamp((g - p["birth"]) / 0.12, 0, 1)
-            if f > 0:
-                R = p["size"] * lush * (0.45 + 0.55 * f)
-                self.ellipse(sd, p["x"] + drift(p["x"], p["y"]), p["y"] - R * 0.12, R * 1.02, R * 0.5,
-                             leaf_color(g, 56))
-        img.alpha_composite(shadow)
-        for x, y, s, rot, gl, _ in each_leaf(g, tree):
-            self.leaf(d, x + drift(x, y), y, s, rot + (drift(x, y) * 0.06 if sway is not None else 0),
-                      leaf_color(gl, 255))
+            if f <= 0:
+                continue
+            R = p["size"] * lush * (0.45 + 0.55 * f)
+            self.ellipse(ld, p["x"] + drift(p["x"], p["y"]), p["y"] + R * 0.02, R * 0.86, R * 0.4,
+                         leaf_color(g, 255, -15))
+        for p in tree["pads"]:
+            f = clamp((g - p["birth"]) / 0.12, 0, 1)
+            if f <= 0:
+                continue
+            R = p["size"] * lush * (0.45 + 0.55 * f)
+            for l in sorted(p["leaves"], key=lambda l: l["dy"], reverse=True):  # back/bottom leaves first
+                if l["order"] > f:
+                    continue
+                x, y = p["x"] + l["dx"] * R, p["y"] + l["dy"] * R
+                lift = (-l["dy"] * 14 - l["dx"] * 3 + (l["turn"] - 0.06) * 40) * (1 if is_light() else 0.75)
+                dx = drift(x, y)
+                self.leaf(ld, x + dx, y, l["s"], l["rot"] + dx * 0.06, leaf_color(g + l["turn"], 255, lift))
+        for sh in tree["shoots"]:
+            f = clamp((g - sh["birth"]) / 0.08, 0, 1)
+            if f <= 0:
+                continue
+            perp = sh["a"] + math.pi / 2
+            for l in sh["leaves"]:
+                if l["t"] <= f:
+                    px, py = shoot_point(sh, l["t"])
+                    x, y = px + math.cos(perp) * 4 * l["side"], py + math.sin(perp) * 4 * l["side"]
+                    self.leaf(ld, x + drift(x, y), y, l["s"], l["rot"], leaf_color(g + l["turn"], 255, 3))
+        # a soft shadow on the wall behind, falling down and to the right
+        alpha = layer.getchannel("A").filter(ImageFilter.GaussianBlur(max(0.6, self.L(6))))
+        strength = 0.2 if is_light() else 0.38
+        cast = Image.new("RGBA", img.size, (12, 16, 14, 0) if is_light() else (0, 0, 0, 0))
+        cast.putalpha(alpha.point(lambda v: int(v * strength)))
+        moved = Image.new("RGBA", img.size)
+        moved.paste(cast, (round(self.L(10)), round(self.L(7))))
+        img.alpha_composite(moved)
+        img.alpha_composite(layer)
         return img.resize((self.w, self.h), Image.NEAREST if self.pixel else Image.LANCZOS)
 
 
