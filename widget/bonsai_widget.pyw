@@ -36,6 +36,9 @@ TAU = math.pi * 2
 BASELINE = 0.14
 SS = 2  # supersampling for smooth edges
 CROP = (30, 0, 570, 462)  # part of the 600x480 mockup scene the widget shows
+GROVE_CROP = (70, 0, 530, 462)  # tighter crop for the small trees in the grove
+GROVE_MINUTES = 30  # sessions active within this window get a tree
+GROVE_MAX = 4
 FONTS = "C:/Windows/Fonts/"
 
 # Each theme: panel/scene colors, plus leaf color stops (context fill, hue, saturation %, lightness %)
@@ -251,14 +254,15 @@ def each_leaf(g):
 
 # ---------- scene rendering ----------
 class Scene:
-    def __init__(self, width):
-        self.k = width / (CROP[2] - CROP[0])  # virtual units -> output pixels
+    def __init__(self, width, crop=None):
+        self.crop = crop or CROP
+        self.k = width / (self.crop[2] - self.crop[0])  # virtual units -> output pixels
         self.w = width
-        self.h = round((CROP[3] - CROP[1]) * self.k)
+        self.h = round((self.crop[3] - self.crop[1]) * self.k)
         self.bg = self._background()
 
     def P(self, x, y):
-        return ((x - CROP[0]) * self.k * SS, (y - CROP[1]) * self.k * SS)
+        return ((x - self.crop[0]) * self.k * SS, (y - self.crop[1]) * self.k * SS)
 
     def L(self, v):
         return v * self.k * SS
@@ -371,10 +375,14 @@ class Scene:
 
 # ---------- session data ----------
 class Session:
-    def __init__(self, cfg):
+    def __init__(self, cfg, path=None):
         self.cfg = cfg
+        self.fixed = path  # follow this transcript only; None = pinned or newest
         self.path = None
         self.offset = 0
+        self.seen_cc = None  # compaction / restore counts the window has already reacted to
+        self.seen_restores = None
+        self.title = None
         self.compactions = 0
         self.last_pre = None
         self.last_duration = None
@@ -389,11 +397,17 @@ class Session:
         self.git_at = 0
 
     def pick(self):
+        if self.fixed:
+            return self.fixed if os.path.exists(self.fixed) else None
         pinned = self.cfg.get("pinned")
         if pinned and os.path.exists(pinned):
             return pinned
         files = glob.glob(os.path.join(PROJECTS, "*", "*.jsonl"))
         return max(files, key=os.path.getmtime) if files else None
+
+    @property
+    def name(self):
+        return os.path.basename(os.path.normpath(self.cwd)) if self.cwd else "session"
 
     def refresh(self):
         """Returns True when the data changed."""
@@ -403,7 +417,7 @@ class Session:
         switched = path != self.path
         if switched:
             self.path, self.offset, self.compactions, self.last_pre = path, 0, 0, None
-            self.last_duration, self.restores, self.restored_msg = None, 0, None
+            self.last_duration, self.restores, self.restored_msg, self.title = None, 0, None, None
             self.cwd, self.tokens, self.jobs, self.git_at = None, None, [], 0
         mtime = os.path.getmtime(path)
         changed = switched or mtime != self.mtime
@@ -442,6 +456,11 @@ class Session:
                     self.last_duration = (meta.get("durationMs") or 0) / 1000 or None
                 except ValueError:
                     pass
+            if b'"custom-title"' in raw:  # the sidebar title the desktop app saves
+                try:
+                    self.title = clean_title(json.loads(raw).get("customTitle"))
+                except ValueError:
+                    pass
             if b'"hook_system_message"' in raw and "restored:".encode() in raw:
                 try:
                     self.restored_msg = (json.loads(raw).get("attachment") or {}).get("content")
@@ -455,18 +474,26 @@ class Session:
                     pass
 
     def _read_tokens(self, path):
-        try:
-            with open(path, "rb") as f:
-                f.seek(max(0, os.path.getsize(path) - 600_000))
-                lines = f.read().decode("utf-8", "replace").splitlines()
-        except OSError:
-            return
+        # Image tool results are stored inline and can be hundreds of KB each, so widen the tail if needed.
+        for span in (600_000, 6_000_000, None):
+            try:
+                with open(path, "rb") as f:
+                    size = os.path.getsize(path)
+                    f.seek(0 if span is None else max(0, size - span))
+                    lines = f.read().decode("utf-8", "replace").splitlines()
+            except OSError:
+                return
+            if self._tokens_from(lines) or span is None or span >= size:
+                return
+
+    def _tokens_from(self, lines):
+        """Sets tokens/after_compact from the newest relevant line. Returns False if none was found."""
         self.after_compact = False
         for line in reversed(lines):
             if '"compact_boundary"' in line:
                 self.after_compact = True  # no reply since the compact yet
                 self.tokens = None
-                return
+                return True
             if '"usage"' not in line or '"isSidechain":true' in line:
                 continue
             try:
@@ -476,13 +503,22 @@ class Session:
             if u:
                 self.tokens = (u.get("input_tokens", 0) + u.get("cache_read_input_tokens", 0)
                                + u.get("cache_creation_input_tokens", 0))
-                return
+                return True
+        return False
 
     @property
     def g(self):
         if self.after_compact or self.tokens is None:
             return BASELINE if self.after_compact else 0.06
         return clamp(self.tokens / self.cfg["window"], 0, 1)
+
+
+def clean_title(t):
+    """Drop emoji and odd spacing the card's fonts can't draw."""
+    if not t:
+        return None
+    keep = "".join(ch for ch in t if ord(ch) < 0x2190 or 0x2E80 <= ord(ch) < 0x1F000)
+    return " ".join(keep.split()) or None
 
 
 def git_state(cwd):
@@ -550,7 +586,20 @@ class Widget:
         self.W = round(self.BASE_W * self.f)
         self.pad = round(14 * self.f)
         self.scene = Scene(self.W - 2 * self.pad)
-        self.session = Session(self.cfg)
+        self.sessions = {}  # transcript path -> Session, one per tree in the grove
+        self.order = []  # grove order, oldest tree first so trees don't jump around
+        self.focus_path = None
+        self.follow = True  # focus follows the newest session until the user picks a tree
+        self.resume_follow = False
+        self.view = "focus"  # "focus" = one full card, "grove" = a tree per active session
+        self._empty = Session(self.cfg, path="")
+        self.grove_scene = None
+        self.grove_cache = {}
+        self.hits = []  # clickable regions from the last draw: (rect, action, arg)
+        self.hover_key = None
+        self._action = None
+        self.anchor = None
+        self.last_size = None
         self.fonts = {
             "title": font("seguisb.ttf", 13 * self.f), "big": font("seguisb.ttf", 30 * self.f),
             "body": font("segoeui.ttf", 11 * self.f), "small": font("segoeui.ttf", 10 * self.f),
@@ -558,7 +607,6 @@ class Widget:
             "button": font("seguisb.ttf", 10 * self.f), "symbol": font("seguisym.ttf", 11 * self.f),
         }
         self.g = None
-        self.cc_seen = None
         self.tween = None
         self.particles = []
         self.tree_key = None
@@ -575,9 +623,6 @@ class Widget:
         self.preview = False
         self.shears = {"x": 470.0, "y": 110.0, "tx": 470.0, "ty": 110.0, "next": 0, "snip_at": None, "snap": 0}
         self.leaf_cache = (None, [])
-        self.button = None
-        self.hover = False
-        self._on_button = False
         try:
             self.signal_seen = os.path.getmtime(SIGNAL)
         except OSError:
@@ -594,22 +639,17 @@ class Widget:
         self.label.bind("<B1-Motion>", self.drag_move)
         self.label.bind("<ButtonRelease-1>", self.release)
         self.label.bind("<Motion>", self.motion)
-        self.label.bind("<Leave>", lambda e: self.set_hover(False))
+        self.label.bind("<Leave>", lambda e: self.set_hover(None))
         self.label.bind("<Button-3>", self.menu)
         self.topvar = tk.BooleanVar(value=self.cfg["topmost"])
         self.pinvar = tk.BooleanVar(value=bool(self.cfg.get("pinned")))
         self.themevar = tk.StringVar(value=self.cfg["theme"] if self.cfg["theme"] in THEMES else "Moss")
 
-        self.session.refresh()
+        self.refresh_sessions()
+        if len(self.order) > 1:
+            self.view = "grove"
         self.g = self.session.g
-        self.cc_seen = self.session.compactions
-        self.restores_seen = self.session.restores
         self.draw()
-        x, y = self.cfg.get("x"), self.cfg.get("y")
-        if x is None or y is None:
-            x = r.winfo_screenwidth() - self.W - round(24 * self.f)
-            y = r.winfo_screenheight() - self.frame_img.height() - round(72 * self.f)
-        r.geometry(f"+{x}+{y}")
         r.deiconify()
         r.update_idletasks()
         round_corners(r)
@@ -623,17 +663,82 @@ class Widget:
         finally:
             self.root.after(2000 if self.phase == "idle" else 500, self.poll)
 
+    @property
+    def session(self):
+        return self.sessions.get(self.focus_path) or self._empty
+
+    def active_paths(self):
+        """Transcripts touched in the last GROVE_MINUTES, newest first (the newest overall if none)."""
+        now, found = time.time(), []
+        for p in glob.glob(os.path.join(PROJECTS, "*", "*.jsonl")):
+            try:
+                found.append((os.path.getmtime(p), p))
+            except OSError:
+                pass
+        found.sort(reverse=True)
+        recent = [p for m, p in found if now - m < GROVE_MINUTES * 60][:GROVE_MAX]
+        return recent or [p for _, p in found[:1]]
+
+    def refresh_sessions(self):
+        paths = self.active_paths()
+        pinned = self.cfg.get("pinned")
+        if pinned and os.path.exists(pinned) and pinned not in paths:
+            paths = [pinned] + paths[:GROVE_MAX - 1]
+        focus = self.focus_path
+        if self.phase == "idle" and (self.follow or focus is None):
+            focus = pinned if pinned and os.path.exists(pinned) else (paths[0] if paths else None)
+        if focus and focus not in paths:
+            paths.append(focus)  # keep the tree you opened even after it goes quiet
+        for p in paths:
+            s = self.sessions.get(p)
+            if s is None:
+                s = self.sessions[p] = Session(self.cfg, p)
+                s.refresh()
+                s.seen_cc, s.seen_restores = s.compactions, s.restores
+            else:
+                s.g_before = s.g
+                s.refresh()
+        for p in list(self.sessions):
+            if p not in paths:
+                del self.sessions[p]
+                self.grove_cache.pop(p, None)
+        self.order = [p for p in self.order if p in paths] + [p for p in paths if p not in self.order]
+        if focus != self.focus_path:
+            self.set_focus(focus)
+
+    def set_focus(self, path):
+        if path == self.focus_path:
+            return
+        self.focus_path = path
+        self.g = self.session.g
+        self.particles, self.pile, self.tween, self.tree_key = [], [], None, None
+        self.caption = None
+
+    def find_session(self, path):
+        want = os.path.normcase(path or "")
+        return next((p for p in self.sessions if os.path.normcase(p) == want), None)
+
     def step(self):
         now = time.time()
+        self.refresh_sessions()
         self.check_signal()
+        for p, o in self.sessions.items():
+            if o.compactions > (o.seen_cc or 0) and p != self.focus_path:
+                if self.view == "grove" and self.phase == "idle":
+                    self.set_focus(p)  # show the compaction on that session's own card
+                    self.view = "focus"
+                    self.g = max(getattr(o, "g_before", o.g), o.g)
+                else:
+                    o.seen_cc, o.seen_restores = o.compactions, o.restores
         s = self.session
-        s.refresh()
-        if s.compactions > self.cc_seen:
-            self.cc_seen = s.compactions
-            self.start_prune(self.g, s.g)
-        if s.restores > self.restores_seen:
-            self.restores_seen = s.restores
+        if s.compactions > (s.seen_cc or 0):
+            s.seen_cc = s.compactions
+            self.start_prune(max(self.g, getattr(s, "g_before", 0)), s.g)
+        if s.restores > (s.seen_restores or 0):
+            s.seen_restores = s.restores
             self.pending_restore = s.restored_msg or ""
+        if self.view == "grove" and len(self.order) <= 1:
+            self.view = "focus"
         if self.phase == "pruned" and self.tween is None and (
                 self.pending_restore is not None or now - self.phase_at > 8):
             self.water(self.pending_restore)
@@ -642,6 +747,8 @@ class Widget:
             self.caption = ("No compaction seen. Click Compact to try again.", "muted", now + 8)
         if self.phase == "compacting" and now - self.phase_at > 600:
             self.set_phase("idle")
+            if self.resume_follow:
+                self.follow, self.resume_follow = True, False
         if self.phase == "idle" and self.tween is None:
             self.g = s.g
         self.draw()
@@ -659,8 +766,23 @@ class Widget:
                 sig = json.load(fh)
         except (OSError, ValueError):
             return
-        same = os.path.normcase(sig.get("transcript") or "") == os.path.normcase(self.session.path or "")
-        if same or not self.cfg.get("pinned"):
+        path = sig.get("transcript") or ""
+        pinned = self.cfg.get("pinned")
+        if pinned and os.path.normcase(path) != os.path.normcase(pinned):
+            return
+        found = self.find_session(path)
+        if not found and os.path.exists(path):
+            s = self.sessions[path] = Session(self.cfg, path)
+            s.refresh()
+            s.seen_cc, s.seen_restores = s.compactions, s.restores
+            self.order.append(path)
+            found = path
+        if found:
+            if found != self.focus_path:
+                self.set_focus(found)
+            self.resume_follow = self.follow
+            self.follow = False  # stay on this tree until the animation finishes
+            self.view = "focus"
             self.set_phase("compacting")
 
     def set_phase(self, phase):
@@ -696,6 +818,8 @@ class Widget:
     def finish_water(self, text):
         self.set_phase("idle")
         self.preview = False
+        if self.resume_follow:
+            self.follow, self.resume_follow = True, False
         self.caption = ("Restored: " + text, "ok", time.time() + 12)
 
     def spawn(self, x, y, s, rot, color, burst):
@@ -769,7 +893,7 @@ class Widget:
             sh["tx"], sh["ty"] = 470, 110 + math.sin(now * 2) * 4
         sh["x"] += (sh["tx"] - sh["x"]) * 0.2
         sh["y"] += (sh["ty"] - sh["y"]) * 0.2
-        if self.phase == "idle" and self.g > 0.9 and not self.tween:
+        if self.view == "focus" and self.phase == "idle" and self.g > 0.9 and not self.tween:
             self.ambient += dt
             if self.ambient > 600:
                 self.ambient = 0
@@ -817,7 +941,8 @@ class Widget:
 
     def V(self, x, y):
         k = self.scene.k
-        return ((x - CROP[0]) * k, (y - CROP[1]) * k)
+        c = self.scene.crop
+        return ((x - c[0]) * k, (y - c[1]) * k)
 
     def overlay(self, size):
         """Particles and shears, drawn on their own layer so fading pieces blend over the tree."""
@@ -883,6 +1008,87 @@ class Widget:
         d.ellipse([px - 2 * k, py - 2 * k, px + 2 * k, py + 2 * k], fill=handle, outline=edge)
 
     def draw(self):
+        self.hits = []
+        img = self.render_grove() if self.view == "grove" else self.render_focus()
+        self.last_img = img
+        self.frame_img = ImageTk.PhotoImage(img)
+        self.label.configure(image=self.frame_img)
+        if img.size != self.last_size:
+            self.last_size = img.size
+            self.place(*img.size)
+
+    def place(self, w, h):
+        """Keep the bottom-right corner fixed, so switching views grows the card up and to the left."""
+        if self.anchor is None:
+            c = self.cfg
+            if c.get("right") is not None and c.get("bottom") is not None:
+                self.anchor = (c["right"], c["bottom"])
+            elif c.get("x") is not None and c.get("y") is not None:
+                self.anchor = (c["x"] + w, c["y"] + h)  # older configs stored the top-left corner
+            else:
+                self.anchor = (self.root.winfo_screenwidth() - round(24 * self.f),
+                               self.root.winfo_screenheight() - round(72 * self.f))
+        self.root.geometry(f"+{int(self.anchor[0] - w)}+{int(self.anchor[1] - h)}")
+
+    def render_grove(self):
+        f, F, pad = self.f, self.fonts, self.pad
+        now = time.time()
+        paths = self.order
+        n = max(1, len(paths))
+        gap = 10 * f
+        W = max(self.W, round(2 * pad + n * 104 * f + (n - 1) * gap))
+        cell = (W - 2 * pad - (n - 1) * gap) / n
+        if self.grove_scene is None or self.grove_scene.w != int(cell):
+            self.grove_scene = Scene(int(cell), GROVE_CROP)
+            self.grove_cache = {}
+        scene = self.grove_scene
+        info_h = 8 * f + 16 * f + 14 * f + 22 * f + 10 * f + 14 * f  # title, project, %, meter, status
+        H = round(pad + 30 * f + scene.h + info_h + 22 * f + pad)
+        img = Image.new("RGBA", (W, H), C["panel"])
+        d = ImageDraw.Draw(img)
+        d.rectangle([0, 0, W - 1, H - 1], outline=C["line"])
+        d.text((pad, pad), "Grove", font=F["title"], fill=C["ink"])
+        count = f"{len(paths)} active"
+        d.text((W - pad - d.textlength(count, font=F["mono"]), pad + 4 * f), count, font=F["mono"], fill=C["muted"])
+        y0 = pad + 30 * f
+        for i, p in enumerate(paths):
+            s = self.sessions[p]
+            g = s.g
+            x = pad + i * (cell + gap)
+            rect = (x - 5 * f, y0 - 5 * f, x + cell + 5 * f, y0 + scene.h + info_h)
+            self.hits.append((rect, "open", p))
+            if self.hover_key == ("open", p):
+                d.rounded_rectangle(rect, radius=8 * f, fill=C["line"])
+            key = (round(g, 3), s.compactions)
+            cached = self.grove_cache.get(p)
+            if not cached or cached[0] != key:
+                cached = self.grove_cache[p] = (key, scene.render(g, s.compactions, []))
+            img.paste(cached[1], (round(x), round(y0)), cached[1])
+            cx = x + cell / 2
+            yy = y0 + scene.h + 8 * f
+            name = ellipsize(d, s.title or s.name, F["small"], cell)
+            d.text((cx - d.textlength(name, font=F["small"]) / 2, yy), name, font=F["small"], fill=C["ink"])
+            yy += 16 * f
+            if s.title and s.title != s.name:
+                proj = ellipsize(d, s.name, F["mono"], cell)
+                d.text((cx - d.textlength(proj, font=F["mono"]) / 2, yy), proj, font=F["mono"], fill=C["muted"])
+            yy += 14 * f
+            _, state, _ = stage_for(g)
+            pct = f"{round(g * 100)}%"
+            d.text((cx - d.textlength(pct, font=F["title"]) / 2, yy), pct, font=F["title"], fill=C["ink"])
+            yy += 22 * f
+            mh = 4 * f
+            d.rounded_rectangle([x, yy, x + cell, yy + mh], radius=mh / 2, fill=C["line"] if self.hover_key != ("open", p) else C["panel"])
+            d.rounded_rectangle([x, yy, x + max(mh, cell * clamp(g, 0, 1)), yy + mh], radius=mh / 2, fill=C[state])
+            yy += 10 * f
+            status = fmt_ago(now - s.mtime if s.mtime else 9e9)
+            d.text((cx - d.textlength(status, font=F["mono"]) / 2, yy), status, font=F["mono"],
+                   fill=C["ok"] if status == "live" else C["muted"])
+        hint = "Click a tree to open it"
+        d.text(((W - d.textlength(hint, font=F["small"])) / 2, H - pad - 14 * f), hint, font=F["small"], fill=C["muted"])
+        return img
+
+    def render_focus(self):
         s, f, F, pad = self.session, self.f, self.fonts, self.pad
         now = time.time()
         tree = self.tree().copy()
@@ -903,7 +1109,17 @@ class Widget:
             r = 3 * f
             cx, cy = self.W - pad - sw - 8 * f, y + 10 * f
             d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=C["ok"])
-        d.text((pad, y), ellipsize(d, proj, F["title"], self.W - 2 * pad - sw - 20 * f), font=F["title"],
+        tx = pad
+        if len(self.order) > 1:  # back to the grove
+            back = f"‹ {len(self.order)}"
+            bw_ = d.textlength(back, font=F["title"]) + 10 * f
+            hovered = self.hover_key == ("grove", None)
+            if hovered:
+                d.rounded_rectangle([pad - 5 * f, y - 2 * f, pad + bw_ - 3 * f, y + 21 * f], radius=6 * f, fill=C["line"])
+            d.text((pad, y), back, font=F["title"], fill=C["ink"] if hovered else C["muted"])
+            self.hits.append(((pad - 5 * f, y - 2 * f, pad + bw_ - 3 * f, y + 21 * f), "grove", None))
+            tx = pad + bw_ + 2 * f
+        d.text((tx, y), ellipsize(d, proj, F["title"], self.W - tx - pad - sw - 20 * f), font=F["title"],
                fill=C["ink"])
         y += 22 * f + 8 * f
         img.paste(tree, (pad, round(y)), tree)
@@ -982,10 +1198,7 @@ class Widget:
             kw = d.textlength(k, font=F["mono"]) + 6 * f
             vcol = C["warn"] if (k == "JOBS" and jobs) else C["ink"]
             d.text((cx + kw, cy - 1 * f), ellipsize(d, v, F["body"], colw - kw - 6 * f), font=F["body"], fill=vcol)
-
-        self.last_img = img
-        self.frame_img = ImageTk.PhotoImage(img)
-        self.label.configure(image=self.frame_img)
+        return img
 
     def draw_button(self, d, y):
         f, F = self.f, self.fonts
@@ -995,45 +1208,66 @@ class Widget:
         w, h = tw + 34 * f, 20 * f
         x1 = self.W - self.pad
         x0 = x1 - w
-        self.button = None if busy else (x0, y, x1, y + h)
+        if not busy:
+            self.hits.append(((x0, y, x1, y + h), "compact", None))
         fg = C["muted"] if busy else C["ink"]
-        fill = C["line"] if (self.hover and not busy) else None
+        fill = C["line"] if (self.hover_key == ("compact", None) and not busy) else None
         d.rounded_rectangle([x0, y, x1, y + h], radius=h / 2, fill=fill, outline=C["line"] if busy else C["muted"],
                             width=max(1, round(f)))
         d.text((x0 + 10 * f, y + 1.5 * f), "✂", font=F["symbol"], fill=C["crit"] if not busy else fg)
         d.text((x0 + 26 * f, y + 2.5 * f), text, font=F["button"], fill=fg)
 
     # --- interaction ---
-    def in_button(self, x, y):
-        b = self.button
-        return bool(b) and b[0] <= x <= b[2] and b[1] <= y <= b[3]
+    def hit_at(self, x, y):
+        for (x0, y0, x1, y1), action, arg in self.hits:
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                return (action, arg)
+        return None
 
     def press(self, e):
-        self._on_button = self.in_button(e.x, e.y)
-        if not self._on_button:
-            self._dx, self._dy = e.x_root - self.root.winfo_x(), e.y_root - self.root.winfo_y()
+        self._action = self.hit_at(e.x, e.y)
+        self._start = (e.x_root, e.y_root)
+        self._dx, self._dy = e.x_root - self.root.winfo_x(), e.y_root - self.root.winfo_y()
 
     def drag_move(self, e):
-        if not self._on_button:
+        if self._action and abs(e.x_root - self._start[0]) + abs(e.y_root - self._start[1]) > 6:
+            self._action = None  # pressed on a tree or button, then dragged: move the window instead
+        if not self._action:
             self.root.geometry(f"+{e.x_root - self._dx}+{e.y_root - self._dy}")
 
     def release(self, e):
-        if self._on_button:
-            self._on_button = False
-            if self.in_button(e.x, e.y):
-                self.on_button()
-                self.draw()
+        action, self._action = self._action, None
+        if action:
+            if self.hit_at(e.x, e.y) == action:
+                self.do(*action)
             return
-        self.cfg["x"], self.cfg["y"] = self.root.winfo_x(), self.root.winfo_y()
+        w, h = self.last_size
+        self.anchor = (self.root.winfo_x() + w, self.root.winfo_y() + h)
+        self.cfg["right"], self.cfg["bottom"] = self.anchor
+        self.cfg.pop("x", None)
+        self.cfg.pop("y", None)
         save_config(self.cfg)
 
-    def motion(self, e):
-        self.set_hover(self.in_button(e.x, e.y))
+    def do(self, action, arg):
+        if action == "compact":
+            self.on_button()
+        elif action == "open":
+            self.follow = False  # stay on the tree you opened
+            self.set_focus(arg)
+            self.view = "focus"
+        elif action == "grove":
+            self.view = "grove"
+            self.follow = True
+        self.hover_key = None
+        self.draw()
 
-    def set_hover(self, on):
-        if on != self.hover:
-            self.hover = on
-            self.label.configure(cursor="hand2" if on else "fleur")
+    def motion(self, e):
+        self.set_hover(self.hit_at(e.x, e.y))
+
+    def set_hover(self, key):
+        if key != self.hover_key:
+            self.hover_key = key
+            self.label.configure(cursor="hand2" if key else "fleur")
             self.draw()
 
     def menu(self, e):
@@ -1044,6 +1278,8 @@ class Widget:
         for name in THEMES:
             themes.add_radiobutton(label=name, value=name, variable=self.themevar, command=self.change_theme)
         m.add_cascade(label="Theme", menu=themes)
+        if len(self.order) > 1 and self.view == "focus":
+            m.add_command(label="Show grove", command=lambda: self.do("grove", None))
         m.add_separator()
         m.add_command(label="Preview compact animation", command=self.run_preview)
         m.add_command(label="Quit", command=self.root.destroy)
@@ -1058,6 +1294,7 @@ class Widget:
         self.cfg["theme"] = self.themevar.get()
         set_theme(self.cfg["theme"])
         self.scene = Scene(self.W - 2 * self.pad)  # background is cached per theme
+        self.grove_scene, self.grove_cache = None, {}
         self.tree_key = None
         self.root.configure(bg=C["panel"])
         self.label.configure(bg=C["panel"])

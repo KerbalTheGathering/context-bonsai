@@ -17,7 +17,11 @@ None of these make model calls. They read the session logs in `~/.claude/project
 
 ## Context Bonsai widget
 
-A small always-on-top card that follows the most recently active Claude Code session:
+A small always-on-top card for your Claude Code sessions.
+
+**The grove:** when more than one session has been active in the last 30 minutes, the card shows one small bonsai per session (up to 4), side by side, labeled with each session's sidebar title and project. The fullest session is the tallest tree. Click a tree to open its full card; click **‹ N** in the card's header to go back. When any session starts compacting, the card switches to that session so the animation plays on its own tree.
+
+**A session's card:**
 
 - **The tree** fills out as context grows. Leaves go from calm to alarming colors near the limit and start falling above 90%. Compacting prunes it back and adds a tally mark to the pot.
 - **The readout** shows context % and tokens, a "compact soon" mark at 85%, and the stage with a short tip.
@@ -25,7 +29,7 @@ A small always-on-top card that follows the most recently active Claude Code ses
 - **Themes:** Moss, Paper, Sakura, Midnight, Sumi-e (right-click → Theme).
 - **Compact button:** copies `/compact` and brings the Claude app to the front, so you paste it with Ctrl+V and Enter. The widget then animates the compaction: shears snip the canopy while it runs, leaves burst off when it finishes, and rain and new buds play when the rehydrate hook restores state.
 
-Controls: drag to move. Right-click for Keep on top, Pin this session, Theme, Preview compact animation, and Quit. Opening the shortcut (or `bonsai_widget.pyw`) again while it runs closes it.
+Controls: drag to move (the card stays anchored at its bottom-right corner when it changes size). Right-click for Keep on top, Pin this session, Theme, Show grove, Preview compact animation, and Quit. Opening the shortcut (or `bonsai_widget.pyw`) again while it runs closes it.
 
 Requirements: Python 3 with Tk and Pillow (`pip install pillow`). It assumes a 1M-token context window; change `window` in `~/.claude/widget/bonsai.json` if yours differs.
 
