@@ -34,6 +34,8 @@ function Need($cmd, $why) {
 function Native { # run a native command; fail loudly on a non-zero exit
     param([string]$what, [Parameter(ValueFromRemainingArguments = $true)] $cmd)
     $rest = @($cmd | Select-Object -Skip 1)
+    # Windows PowerShell turns a native tool's stderr (npm's warnings) into errors; judge by exit code instead
+    $ErrorActionPreference = 'Continue'
     $out = & $cmd[0] @rest 2>&1 | Out-String
     if ($LASTEXITCODE) { throw "$what failed (exit $LASTEXITCODE):`n$out" }
     $out
@@ -144,7 +146,8 @@ if (-not $SkipApp) {
         @{ repo = $repo; version = $version
            launch = @{ file = $exe; args = '' }
            classic = @{ file = $pythonw; args = "`"$classicScript`"" } } |
-            ConvertTo-Json -Depth 4 | Set-Content (Join-Path $data 'install.json') -Encoding UTF8
+            ConvertTo-Json -Depth 4 | ForEach-Object { # UTF-8 without a BOM, so any JSON reader takes it
+                [IO.File]::WriteAllText((Join-Path $data 'install.json'), $_, (New-Object Text.UTF8Encoding $false)) }
     }
 }
 Write-Host $(if ($Uninstall) { 'Context Bonsai removed.' } else { 'Context Bonsai installed. New sessions use the plugin hooks; restart Claude Code if it was already running.' })
