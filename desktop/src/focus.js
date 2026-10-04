@@ -311,7 +311,9 @@ export class FocusView extends Container {
     this.scene.phase = this.ctrl.phase;
     this.scene.update(ctx);
     const now = performance.now() / 1000;
-    (this.S || styleOf(this.ctrl.focusTheme())).animatePanel(this, now);
+    const S0 = this.S || styleOf(this.ctrl.focusTheme());
+    this.panelMoving = !!S0.animatesPanel && ctx.ambient && (ctx.working || ctx.hovering);
+    if (this.panelMoving) S0.animatePanel(this, now);
 
     if (this.zen) {
       if (this.zenTag.visible) {
@@ -330,8 +332,10 @@ export class FocusView extends Container {
 
     // live dot breathes (a transform, not a redraw)
     const pulse = 0.5 + 0.5 * Math.sin(now * 2.6);
-    this.liveHalo.scale.set((3.5 + pulse * 3) / 6.5);
-    this.liveHalo.alpha = 0.25 * (1 - pulse);
+    if (this.live) { // only a live session breathes, so a quiet card needs no frames
+      this.liveHalo.scale.set((3.5 + pulse * 3) / 6.5);
+      this.liveHalo.alpha = 0.25 * (1 - pulse);
+    }
 
     // the shelf edge doubles as the meter; a shimmer slides along it while compacting
     const W = this.W, k = this.scene.k, shelf = (452 - this.scene.crop[1]) * k, mh = 4;
@@ -343,11 +347,17 @@ export class FocusView extends Container {
       this.mkey = mkey;
       S.meter(this, { W, y: shelf, mh, g, color, col, compacting, now });
     }
-    if (!compacting) this.meterGlow.alpha = (S.glowAlpha ?? 0.18) + 0.12 * pulse;
+    if (!compacting) this.meterGlow.alpha = (S.glowAlpha ?? 0.18) + (this.live ? 0.12 * pulse : 0.06);
 
     // context per call, drawn in over the first second
     const st = s?.stats;
     if (this.spark.visible && st) this.drawSpark(st.series, col, color);
+  }
+
+  // 2 = something moves, 1 = gentle ambience only, 0 = still (see Diorama.motion)
+  get motion() {
+    if (this.zen) return this.scene.motion;
+    return Math.max(this.scene.motion, this.live || this.panelMoving ? 1 : 0);
   }
 
   drawSpark(series, col, color) {

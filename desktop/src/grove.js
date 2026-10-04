@@ -160,6 +160,16 @@ export class GroveView extends Container {
     });
   }
 
+  order() {
+    return this.ctrl.order;
+  }
+
+  get motion() {
+    let m = this.panelMoving ? 1 : 0;
+    for (const c of this.cards.values()) if (c.visible) m = Math.max(m, c.scene.motion);
+    return m;
+  }
+
   get n() {
     return this.ctrl.order.length;
   }
@@ -324,7 +334,9 @@ export class GroveView extends Container {
 
   update(ctx) {
     const dt = Math.min(ctx.dt, 50) / 1000;
-    this.S?.animatePanel(this, performance.now() / 1000);
+    const anyWorking = this.order().some((p) => nowSec() - (this.ctrl.sessions.get(p)?.mtime || 0) < 8);
+    this.panelMoving = !!this.S?.animatesPanel && ctx.ambient && (anyWorking || ctx.hovering);
+    if (this.panelMoving) this.S.animatePanel(this, performance.now() / 1000);
     if (!this.drag) { // a critically damped spring toward the target card
       const k = 90, c = 2 * Math.sqrt(k);
       this.vel += (k * (this.target - this.scroll) - c * this.vel) * dt;

@@ -251,6 +251,7 @@ const glass = {
       s.bx = lerp(x0 + 60, x1 - 60, (i + 0.5) / colors.length);
       s.by = y0 + 120 + i * 50;
       s.ph = i * 2.1;
+      s.position.set(s.bx, s.by); // where it rests until it drifts
       s.scale.set(4.2, 2.6);
       d.backFx.addChild(s);
       return s;
@@ -291,6 +292,7 @@ const glass = {
         s.bx = W * (0.2 + 0.3 * i);
         s.by = h * (0.25 + 0.28 * i);
         s.ph = i * 1.9;
+        s.position.set(s.bx, s.by);
         s.scale.set((W / 128) * 1.3, (h / 128) * 0.7);
         fx.addChild(s);
         return s;
@@ -304,6 +306,7 @@ const glass = {
         .stroke({ width: 1, color: 0xffffff, alpha: theme.light ? 0.8 : 0.1 });
     }
   },
+  animatesPanel: true,
   animatePanel(view, t) {
     for (const s of view.blobs || []) {
       s.x = s.bx + Math.sin(t * 0.13 + s.ph) * 40;

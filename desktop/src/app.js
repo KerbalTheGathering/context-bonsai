@@ -1,7 +1,7 @@
 // Context Bonsai renderer: owns the view (focus card or grove), the compaction choreography and the
 // ambience, and keeps the window sized to the card. Data arrives from the main process every ~2s.
 import "pixi.js/unsafe-eval";
-import { Application } from "pixi.js";
+import { Application, UPDATE_PRIORITY } from "pixi.js";
 import { resolveTheme } from "../shared/themes.js";
 import { FocusView } from "./focus.js";
 import { GroveView } from "./grove.js";
@@ -54,7 +54,19 @@ class Controller {
     api.onState(guard((s) => this.onState(s)));
     api.onCommand(guard((c) => this.onCommand(c)));
     api.ready();
+    // draw only when something changed: replace Pixi's every-frame render with one that checks
+    this.needsRender = true;
+    this.renderedAt = 0;
+    this.app.ticker.remove(this.app.render, this.app);
     this.app.ticker.add((t) => this.tick(t.deltaMS));
+    this.app.ticker.add(() => {
+      if (!this.needsRender) return;
+      this.needsRender = false;
+      this.renderedAt = performance.now();
+      this.app.render();
+    }, null, UPDATE_PRIORITY.LOW);
+    api.onPause?.((paused) => (paused ? this.app.ticker.stop() : (this.invalidate(), this.app.ticker.start())));
+    this.watchResolution();
     setInterval(() => this.step(), 500);
   }
 
@@ -102,6 +114,7 @@ class Controller {
   }
 
   onCommand({ cmd, value }) {
+    this.invalidate();
     if (cmd === "view") value === "grove" ? this.showGrove() : this.showFocus();
     else if (cmd === "compact") this.onCompact();
     else if (cmd === "preview") this.runPreview();
@@ -150,7 +163,29 @@ class Controller {
     view.enter?.();
   }
 
-  relayout() {
+  invalidate() {
+    this.needsRender = true;
+  }
+
+  // Moved to a monitor with different scaling: render at its resolution and re-bake what was baked.
+  watchResolution() {
+    const dpr = window.devicePixelRatio || 1;
+    matchMedia(`(resolution: ${dpr}dppx)`).addEventListener("change", () => {
+      this.onResolution();
+      this.watchResolution();
+    }, { once: true });
+  }
+
+  onResolution() {
+    const r = window.devicePixelRatio || 1;
+    this.app.renderer.resize(this.size?.w || 300, this.size?.h || 420, r);
+    for (const scene of [this.focus.scene, ...[...this.grove.cards.values()].map((c) => c.scene)]) scene.resize(scene.w);
+    this.focus.panelKey = this.grove.panelKey = null;
+    this.relayout();
+  }
+
+  relayout(invalidate = true) {
+    if (invalidate) this.invalidate();
     const { w, h } = this.current.layout();
     const panel = (this.current === this.grove ? this.widgetTheme() : this.focusTheme()).colors.panel;
     if (panel !== this.panelColor) { // what shows for a moment while the window resizes
@@ -260,7 +295,7 @@ class Controller {
     if (this.phase === "idle" && !this.gTween && !this.preview && s && Math.abs(s.g - this.g) > 0.002) {
       this.gTween = { from: this.g, to: s.g, t0: performance.now(), dur: 1200 }; // grow smoothly to the new size
     }
-    this.relayout();
+    this.relayout(false); // text that ticks over (timers, "idle 3m") shows on the next safety redraw
   }
 
   // --- ambience ---
@@ -299,15 +334,15 @@ class Controller {
       || (this.current === this.grove && (this.grove.drag || Math.abs(this.grove.vel) > 0.001
         || Math.abs(this.grove.target - this.grove.scroll) > 0.001))
       || (this.current === this.focus && this.focus.scene.particles.length > 0);
-    const swaying = this.current === this.grove
-      ? [...this.grove.cards.values()].some((c) => c.visible && c.scene.moving)
-      : this.focus.scene.moving;
-    this.app.ticker.maxFPS = window.__fpsCap ?? (lively || this.hovering ? 0 : swaying ? 30 : 8);
+    const motion = (this.current === this.grove ? this.grove : this.focus).motion;
+    // 60 fps for things you're doing, 30 for sway and compaction, 15 for ambience, and when nothing moves
+    // just 4 ticks a second to notice changes, drawing only when something did (or once a second)
+    this.app.ticker.maxFPS = window.__fpsCap ?? (lively ? 0 : motion >= 2 ? 30 : motion === 1 ? 15 : 4);
+    if (lively || motion > 0 || performance.now() - this.renderedAt > 1000) this.invalidate();
     if (window.__probe && performance.now() - (this.probeAt || 0) > 2000) {
       this.probeAt = performance.now();
-      console.log(`fps ${this.app.ticker.FPS.toFixed(0)} max ${this.app.ticker.maxFPS} lively ${!!lively} hover ${this.hovering} `
-        + `swaying ${swaying} view ${this.view} drag ${!!this.grove.drag} vel ${this.grove.vel.toFixed(4)} `
-        + `scroll ${this.grove.scroll.toFixed(3)}/${this.grove.target}`);
+      console.log(`fps ${this.app.ticker.FPS.toFixed(0)} max ${this.app.ticker.maxFPS} lively ${!!lively} motion ${motion} `
+        + `view ${this.view} hover ${this.hovering}`);
     }
     if (this.gTween) {
       const { from, to, t0, dur } = this.gTween;
@@ -319,9 +354,10 @@ class Controller {
       }
     }
     const ambient = this.cfg.ambient !== false;
-    const ctx = { dt, ambient, working: this.working(), sleeping: this.sleeping(), night: this.night(), sky: this.sky() };
+    const ctx = { dt, ambient, working: this.working(), sleeping: this.sleeping(), night: this.night(), sky: this.sky(),
+      hovering: this.hovering };
     if (this.current === this.grove) {
-      this.grove.update({ dt, ambient, working: false, sleeping: false, night: ctx.night, sky: ctx.sky });
+      this.grove.update({ ...ctx, working: false, sleeping: false });
     } else this.focus.update(ctx);
   }
 

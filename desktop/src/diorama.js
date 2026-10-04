@@ -131,6 +131,8 @@ export class Diorama extends Container {
     this.clip.clear().rect(0, 0, this.w, this.h).fill(0xffffff);
     this.buildBack();
     this.builtKey = null;
+    this.stillValid = false;
+    this.shadowDirty = true;
   }
 
   setTheme(theme) {
@@ -635,12 +637,14 @@ export class Diorama extends Container {
       this.bakeShadow();
     }
 
-    // wind: a breeze while Claude works, a whisper while it waits, still at night
-    const target = !ctx.ambient ? 0 : ctx.sleeping ? 0.08 : ctx.working ? 1 : 0.28;
+    // wind: a breeze while Claude works; still while it waits on you (an occasional leaf lets go)
+    const target = ctx.ambient && ctx.working ? 1 : 0;
     this.wind += (target - this.wind) * Math.min(1, dt / 900);
     const gust = 0.65 + 0.35 * Math.sin(t * 0.63) * Math.sin(t * 1.37 + 1.1);
     const w = this.wind * gust * this.S.wind;
-    this.S.animate?.(this, t, dt);
+    // a style's ambient backdrop (the aurora) drifts while the session works or you're looking
+    this.auroraOn = !!this.S.animate && ctx.ambient && (ctx.working || ctx.hovering);
+    if (this.auroraOn) this.S.animate(this, t, dt);
     // a still tree is baked into one texture until the wind picks up or it grows
     const still = target === 0 && this.wind < 0.004;
     if (still && (!this.still || !this.stillValid)) {
@@ -679,10 +683,13 @@ export class Diorama extends Container {
   }
 
   updateShafts(ctx, dt, t) {
-    // light shafts drift in while working by day
+    // light shafts drift in while working by day, and hold still otherwise
+    this.shaftsMoving = false;
     for (const s of this.shafts) {
-      const want = this.S.shafts && ctx.ambient && !ctx.night ? (ctx.working ? 0.07 : 0.035) : 0;
-      s.alpha += (want * (0.7 + 0.3 * Math.sin(t * 0.5 + s.ph)) - s.alpha) * Math.min(1, dt / 600);
+      const on = this.S.shafts && ctx.ambient && !ctx.night && ctx.working;
+      const want = on ? 0.07 * (0.7 + 0.3 * Math.sin(t * 0.5 + s.ph)) : 0;
+      if (Math.abs(want - s.alpha) > 0.002 || on) this.shaftsMoving = true;
+      s.alpha += (want - s.alpha) * Math.min(1, dt / 600);
       s.tint = hex(this.theme.colors.glow);
     }
   }
@@ -690,6 +697,7 @@ export class Diorama extends Container {
   updateSky(ctx, dt) {
     // sky: the clock's tint over the scene, deeper when the session sleeps
     const sky = ctx.sky || { color: 0xffffff, alpha: 0 };
+    this.skyMoving = Math.abs(sky.alpha - this.skyTint.alpha) > 0.002;
     this.skyTint.alpha += (sky.alpha - this.skyTint.alpha) * Math.min(1, dt / 1500);
     this.skyTint.color = sky.color;
     this.sky.tint = this.skyTint.color;
@@ -865,8 +873,13 @@ export class Diorama extends Container {
     this.particles = keep;
   }
 
-  get moving() {
-    return !this.still || this.particles.length > 0;
+  // How much is moving, for the frame rate: 2 = sway or compaction, 1 = ambience only (fireflies, motes,
+  // the aurora, a sky or light fading), 0 = nothing, so nothing needs drawing.
+  get motion() {
+    if (!this.still || this.phase !== "idle" || this.particles.some((p) => p.kind !== "fly" && p.kind !== "mote")) return 2;
+    if (this.particles.length || this.auroraOn || this.skyMoving || this.shaftsMoving
+      || this.can.alpha > 0.01 || this.shears.alpha > 0.01) return 1;
+    return 0;
   }
 
   get busy() {

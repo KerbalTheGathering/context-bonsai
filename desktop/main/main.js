@@ -1,7 +1,7 @@
 // Context Bonsai (desktop): Electron main process. Polls Claude Code transcripts, tracks which sessions
 // are open, notices compactions and restores, and feeds a PixiJS renderer in a frameless, transparent
 // window. Launching it again while it runs closes it, like the Tk widget.
-const { app, BrowserWindow, Menu, clipboard, ipcMain, nativeTheme, screen, systemPreferences } = require("electron");
+const { app, BrowserWindow, Menu, clipboard, ipcMain, nativeTheme, powerMonitor, screen, systemPreferences } = require("electron");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -9,6 +9,7 @@ const { execFile } = require("child_process");
 const { Session, allTranscripts, openTranscripts, norm } = require("./data");
 const { fitInside } = require("./place");
 const { readFile, saveKeys } = require("./config");
+const { setupDev } = require("./dev");
 const { THEMES, THEME_NAMES } = require("../shared/themes");
 const STYLE_LABELS = { diorama: "Diorama", glass: "Glass", ink: "Ink" };
 
@@ -54,6 +55,7 @@ function loadConfig() {
     c.theme = process.env.BONSAI_THEME;
     c.project_themes = {};
   }
+  if (process.env.BONSAI_CFG) Object.assign(c, JSON.parse(process.env.BONSAI_CFG)); // dev aid: unsaved overrides
   return c;
 }
 
@@ -209,13 +211,6 @@ function createWindow() {
   });
   win.loadFile(path.join(__dirname, "..", "index.html"));
   if (DEV) win.webContents.openDevTools({ mode: "detach" });
-  const logDir = process.env.BONSAI_SHOTS || process.env.BONSAI_PROBE;
-  if (logDir) {
-    const log = path.join(logDir, "console.log");
-    fs.writeFileSync(log, "");
-    win.webContents.on("console-message", (e) => fs.appendFileSync(log, `[${e.level}] ${e.message}\n`));
-    win.webContents.on("did-finish-load", () => win.webContents.executeJavaScript("window.__probe = 1"));
-  }
   win.on("closed", () => app.quit());
 }
 
@@ -324,70 +319,19 @@ ipcMain.on("toggle-zen", () => {
   push();
 });
 
-// Dev aid: BONSAI_SHOTS=<dir> walks the views and the compaction preview, saving a PNG at each step.
-function shots(dir) {
-  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-  const snap = async (name) => {
-    const img = await win.webContents.capturePage();
-    fs.writeFileSync(path.join(dir, name + ".png"), img.toPNG());
-  };
-  (async () => {
-    await wait(5000);
-    await snap("1-start");
-    command("view", "grove");
-    await wait(1500);
-    await snap("2-grove");
-    win.webContents.executeJavaScript("window.__bonsai?.grove.page(1)");
-    await wait(250);
-    await snap("3-grove-sliding");
-    await wait(1200);
-    await snap("4-grove-page2");
-    command("view", "focus");
-    await wait(1800);
-    await snap("5-focus");
-    command("preview");
-    await wait(3000);
-    await snap("6-compacting");
-    await wait(2300);
-    await snap("7-pruned");
-    await wait(2600);
-    await snap("8-watering");
-    await wait(4000);
-    await snap("9-restored");
-    cfg.zen = true;
-    push();
-    await wait(1200);
-    await snap("10-zen-focus");
-    command("view", "grove");
-    await wait(1500);
-    await snap("11-zen-grove");
-    cfg.zen = false;
-    push();
-    app.quit();
-  })().catch((e) => { fs.writeFileSync(path.join(dir, "error.txt"), String(e.stack || e)); app.quit(); });
-}
-
 if (!app.requestSingleInstanceLock()) {
   app.quit(); // already running: launching again toggles it off
 } else {
   app.on("second-instance", () => app.quit());
   app.whenReady().then(() => {
     createWindow();
-    if (process.env.BONSAI_SHOTS) shots(process.env.BONSAI_SHOTS);
-    if (process.env.BONSAI_LEAK) { // dev aid: run the renderer's leak check, write the result, quit
-      win.webContents.once("did-finish-load", () => setTimeout(async () => {
-        const r = await win.webContents.executeJavaScript("window.__leakTest(40).catch((e) => ({ error: String(e.stack || e) }))")
-          .catch((e) => ({ error: String(e) }));
-        fs.writeFileSync(process.env.BONSAI_LEAK, JSON.stringify(r));
-        app.quit();
-      }, 4000));
-    }
-    if (process.env.BONSAI_FPS) { // dev aid: pin the frame rate to measure what it costs
-      win.webContents.on("did-finish-load", () => win.webContents.executeJavaScript(`window.__fpsCap = ${+process.env.BONSAI_FPS}`));
-    }
+    setupDev(app, win, { command, setZen: (on) => { cfg.zen = on; push(); } });
     setInterval(refresh, POLL_MS);
     nativeTheme.on("updated", () => push());
     for (const e of ["display-added", "display-removed", "display-metrics-changed"]) screen.on(e, replace);
+    // nothing to see on a locked screen: stop drawing until it unlocks
+    powerMonitor.on("lock-screen", () => win?.webContents.send("pause", true));
+    powerMonitor.on("unlock-screen", () => win?.webContents.send("pause", false));
     systemPreferences.on?.("accent-color-changed", () => push());
   });
   app.on("window-all-closed", () => app.quit());
