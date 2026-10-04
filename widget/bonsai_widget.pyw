@@ -25,9 +25,11 @@ HOME = os.path.expanduser("~")
 PROJECTS = os.path.join(HOME, ".claude", "projects")
 SESSIONS = os.path.join(HOME, ".claude", "sessions")  # Claude Code writes <pid>.json here for each open session
 HERE = os.path.dirname(os.path.abspath(__file__))
-CONFIG = os.path.join(HERE, "bonsai.json")
-SIGNAL = os.path.join(HERE, "signal.json")  # written by the PreCompact hook (precompact_signal.py)
-sys.path.insert(0, os.path.join(HOME, ".claude", "hooks"))
+# settings and the compaction signal live in ~/.claude/widget, shared with the desktop app and the plugin
+DATA = os.environ.get("BONSAI_DATA_DIR") or os.path.join(HOME, ".claude", "widget")
+CONFIG = os.path.join(DATA, "bonsai.json")
+SIGNAL = os.path.join(DATA, "signal.json")  # written by the plugin's PreCompact hook (precompact_signal.py)
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "plugin", "hooks"))  # the rehydrate hook, for running_jobs
 try:
     from rehydrate import running_jobs
 except Exception:  # widget still works without the hook

@@ -26,7 +26,8 @@ function themeItems(checked, pick, labelFor = (n) => n) {
   return items;
 }
 
-const WIDGET_DIR = path.join(os.homedir(), ".claude", "widget"); // shared with the Tk widget and the PreCompact hook
+// shared with the Tk widget and the plugin's PreCompact hook (BONSAI_DATA_DIR overrides it, as there)
+const WIDGET_DIR = process.env.BONSAI_DATA_DIR || path.join(os.homedir(), ".claude", "widget");
 const CONFIG = path.join(WIDGET_DIR, "bonsai.json");
 const SIGNAL = path.join(WIDGET_DIR, "signal.json");
 const DEFAULTS = { window: 1_000_000, topmost: true, pinned: null, theme: "Moss", ambient: true, zen: false,

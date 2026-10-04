@@ -9,10 +9,10 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-REHYDRATE = os.path.join(ROOT, "hooks", "rehydrate.py")
-STATUSLINE = os.path.join(ROOT, "statusline", "statusline.py")
-PRECOMPACT = os.path.join(ROOT, "widget", "precompact_signal.py")
-sys.path.insert(0, os.path.join(ROOT, "hooks"))
+REHYDRATE = os.path.join(ROOT, "plugin", "hooks", "rehydrate.py")
+STATUSLINE = os.path.join(ROOT, "plugin", "statusline", "statusline.py")
+PRECOMPACT = os.path.join(ROOT, "plugin", "hooks", "precompact_signal.py")
+sys.path.insert(0, os.path.join(ROOT, "plugin", "hooks"))
 import rehydrate  # noqa: E402
 
 
@@ -114,10 +114,10 @@ class PreCompactTest(unittest.TestCase):
     def test_writes_signal(self):
         tmp = tempfile.mkdtemp(prefix="bonsai-test-")
         self.addCleanup(shutil.rmtree, tmp, True)
-        script = shutil.copy(PRECOMPACT, tmp)  # the signal lands next to the script
-        code, _ = run(script, {"transcript_path": "C:/x/t.jsonl", "session_id": "s1", "trigger": "manual"})
+        code, _ = run(PRECOMPACT, {"transcript_path": "C:/x/t.jsonl", "session_id": "s1", "trigger": "manual"},
+                      env={"BONSAI_DATA_DIR": os.path.join(tmp, "widget")})
         self.assertEqual(code, 0)
-        with open(os.path.join(tmp, "signal.json"), encoding="utf-8") as f:
+        with open(os.path.join(tmp, "widget", "signal.json"), encoding="utf-8") as f:
             sig = json.load(f)
         self.assertEqual(sig["event"], "precompact")
         self.assertEqual(sig["transcript"], "C:/x/t.jsonl")

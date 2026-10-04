@@ -27,6 +27,11 @@ jobs:
         run: |
           python tools/tree_fixture.py
           git diff --exit-code desktop/test/fixtures/trees.json
+      - name: Plugin and marketplace manifests are valid
+        run: |
+          npm install -g @anthropic-ai/claude-code
+          claude plugin validate --strict plugin
+          claude plugin validate --strict .
       - name: Desktop app tests
         working-directory: desktop
         run: |
