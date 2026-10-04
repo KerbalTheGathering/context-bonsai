@@ -19,7 +19,7 @@ None of these make model calls. They read the session logs in `~/.claude/project
 
 A small always-on-top card for your Claude Code sessions.
 
-**The grove:** when more than one session has been active in the last 30 minutes, the card shows one small bonsai per session (up to 4), side by side, labeled with each session's sidebar title and project. The fullest session is the tallest tree. Click a tree to open its full card; click **‹ N** in the card's header to go back. When any session starts compacting, the card switches to that session so the animation plays on its own tree.
+**The grove:** when more than one session is open (Claude Code lists open sessions in `~/.claude/sessions`) or has been active in the last 30 minutes, the card shows one small bonsai per session (up to 12), four at a time in a carousel: page with the ‹ › arrows in the header, the dots underneath, or the mouse wheel. Trees are labeled with each session's sidebar title and project. The fullest session is the tallest tree. Click a tree to open its full card; click **‹ N** in the card's header to go back. When any session starts compacting, the card switches to that session so the animation plays on its own tree.
 
 **A session's card:**
 
@@ -34,9 +34,24 @@ A small always-on-top card for your Claude Code sessions.
 - **Themes:** Auto (follows Windows light/dark mode and your accent color), Seasons (changes with the date), Moss, Paper, Sakura, Midnight, Sumi-e, Canyon, Clay, Neon and Pixel. Right-click → *Theme for <project>* gives a project its own theme, so the grove can mix them.
 - **Compact button:** copies `/compact` and brings the Claude app to the front, so you paste it with Ctrl+V and Enter. The widget then animates the compaction: shears snip the canopy while it runs, leaves burst off when it finishes, and rain and new buds play when the rehydrate hook restores state.
 
-Controls: drag to move (the card stays anchored at its bottom-right corner when it changes size). Right-click for Keep on top, Pin this session, Theme, Zen mode, Show grove, Compact, Preview compact animation, and Quit. Opening the shortcut (or `bonsai_widget.pyw`) again while it runs closes it.
+Controls: drag to move (the card stays anchored at its bottom-right corner when it changes size). Right-click for Keep on top, Pin this session, Theme, View (Focus or Grove), Zen mode, Rescan sessions (looks for open sessions again and re-reads every transcript's stats), Compact, Preview compact animation, and Quit. Opening the shortcut (or `bonsai_widget.pyw`) again while it runs closes it.
 
 Requirements: Python 3 with Tk and Pillow (`pip install pillow`). It assumes a 1M-token context window; change `window` in `~/.claude/widget/bonsai.json` if yours differs.
+
+## Context Bonsai desktop (Electron + PixiJS)
+
+`desktop/` is a rewrite of the widget's grove and focus views as a GPU-rendered PixiJS app in Electron. The Tk widget stays as is; run one or the other (they share `~/.claude/widget/bonsai.json` for theme, pin and project themes).
+
+- **Living trees:** the same seeded tree per session as the Tk widget, but every leaf is its own sprite moving in a gusty wind while that session works. A cast shadow, a pool of light and light shafts by day; motes while working, fireflies at night. Still trees are baked to a texture so an idle grove costs little.
+- **Grove carousel:** drag or flick it (it carries on with momentum and settles on a tree), scroll the wheel, or use the arrows and page dots. Cards lift on hover; clicking one zooms into its focus card.
+- **Focus card:** the readout, shelf meter, status and Compact button as before, a sparkline that draws itself in, and the same compaction choreography (shears, falling leaves, watering can, buds).
+- **Three art styles**, picked by the theme (right-click → Theme lists them grouped):
+  - *Diorama* (Moss, Paper, Sakura, Midnight, Canyon, Clay, Neon, Pixel): the lit bonsai on a wooden stand with a cast shadow.
+  - *Glass* (Aurora, Frost): frosted panes over a slowly drifting aurora, a glass pot on a lit horizon, foliage as glowing orbs with glowing wood, neon meters.
+  - *Ink* (Sumi-e, Night Ink): washi paper with far mountains in a pale wash, a brush-stroke trunk with ink bleeding into the paper, ink-dab foliage that darkens where it overlaps, a red seal, calmer wind and slower falling leaves.
+- **Themes are data** (`desktop/shared/themes.js`: a palette, leaf color stops and a `style`); styles are sets of hooks in `desktop/src/styles.js` for the backdrop, wood, leaves, panel, dividers and meter. The Tk widget doesn't know the glass and ink themes and shows Moss for them.
+
+Run it from `desktop/` with `npm install` then `npm start` (`npm run dev` opens dev tools), or `.\install.ps1 -Desktop` to build it and point the **Context Bonsai** Start menu shortcut at it (the Tk widget moves to **Context Bonsai (classic)**). Opening the shortcut again closes it. Dev aids: `BONSAI_SHOTS=<dir> npx electron .` walks the views and the compaction preview and saves a screenshot at each step; add `BONSAI_THEME=<name>` to preview a theme without saving it.
 
 ## Install
 

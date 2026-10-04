@@ -10,3 +10,7 @@ widget/signal.json.tmp
 icon_preview.png
 context-bonsai.html
 !mockup/context-bonsai.html
+
+# desktop (Electron + PixiJS) build output
+desktop/node_modules/
+desktop/dist/
