@@ -192,9 +192,14 @@ class Session {
     let changed = mtime !== this.mtime;
     if (changed) {
       this.mtime = mtime;
-      if (st.size < this.offset) Object.assign(this, new Session(this.path), { mtime }); // rewritten
+      const rewritten = st.size < this.offset;
+      if (rewritten) this.reset(mtime);
       this.scanNew(st.size);
       this.readTokens(st.size);
+      if (rewritten && this.seenCc !== undefined) { // what was already shown isn't news
+        this.seenCc = this.compactions;
+        this.seenRestores = this.restores;
+      }
       this.jobs = [...this.launched].filter(([tid]) => !this.finished.has(tid))
         .map(([tid, tuid]) => ({ id: tid, desc: this.jobDesc.get(tuid) || "" }));
     }
@@ -210,6 +215,12 @@ class Session {
       });
     }
     return changed;
+  }
+
+  // The file was rewritten (it shrank): start over, keeping who's listening.
+  reset(mtime) {
+    const keep = { onChange: this.onChange, seenCc: this.seenCc, seenRestores: this.seenRestores, window: this.window };
+    Object.assign(this, new Session(this.path), keep, { mtime });
   }
 
   // Count compactions, gather stats and the cwd, reading only what was appended since last time.

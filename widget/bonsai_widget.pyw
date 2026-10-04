@@ -984,8 +984,11 @@ def is_light():
 class Widget:
     BASE_W = 248
 
+    SHARED_KEYS = ("theme", "project_themes", "pinned", "ambient", "zen", "topmost", "window")
+
     def __init__(self):
         self.cfg = load_config()
+        self.cfg_seen = config_mtime()
         set_theme(self.cfg["theme"])
         self.root = tk.Tk()
         self.root.withdraw()
@@ -1169,8 +1172,28 @@ class Widget:
         want = os.path.normcase(path or "")
         return next((p for p in self.sessions if os.path.normcase(p) == want), None)
 
+    def reload_config(self):
+        """Pick up settings the desktop app changed in the shared config file."""
+        m = config_mtime()
+        if m == self.cfg_seen:
+            return
+        self.cfg_seen = m
+        disk = load_config()
+        if all(disk.get(k) == self.cfg.get(k) for k in self.SHARED_KEYS):
+            return
+        for k in self.SHARED_KEYS:
+            self.cfg[k] = disk.get(k)
+        self.topvar.set(bool(self.cfg["topmost"]))
+        self.root.attributes("-topmost", bool(self.cfg["topmost"]))
+        self.pinvar.set(bool(self.cfg.get("pinned")))
+        self.themevar.set(self.cfg["theme"] if self.cfg["theme"] in THEME_NAMES else "Moss")
+        self.zenvar.set(bool(self.cfg.get("zen")))
+        self.ambvar.set(self.cfg.get("ambient", True))
+        self.grove_cache, self.sway_cache, self.tree_key, self.card = {}, {}, None, None
+
     def step(self):
         now = time.time()
+        self.reload_config()
         self.refresh_sessions()
         self.check_signal()
         for p, o in self.sessions.items():
@@ -1943,7 +1966,7 @@ class Widget:
             return  # double-clicking a button or tab shouldn't also switch modes
         self.cfg["zen"] = not self.cfg.get("zen")
         self.zenvar.set(self.cfg["zen"])
-        save_config(self.cfg)
+        self.cfg_seen = save_config(self.cfg, "zen")
         self.hover_key = None
         self.draw()
 
@@ -2211,7 +2234,7 @@ class Widget:
         self.cfg["right"], self.cfg["bottom"] = self.anchor
         self.cfg.pop("x", None)
         self.cfg.pop("y", None)
-        save_config(self.cfg)
+        self.cfg_seen = save_config(self.cfg, "right", "bottom", drop=("x", "y"))
 
     def do(self, action, arg):
         if action == "compact":
@@ -2234,7 +2257,7 @@ class Widget:
             return
         elif action == "page":
             self.cfg["page"] = arg
-            save_config(self.cfg)
+            self.cfg_seen = save_config(self.cfg, "page")
         self.hover_key = None
         self.draw()
 
@@ -2305,7 +2328,7 @@ class Widget:
     def toggle_top(self):
         self.cfg["topmost"] = self.topvar.get()
         self.root.attributes("-topmost", self.cfg["topmost"])
-        save_config(self.cfg)
+        self.cfg_seen = save_config(self.cfg, "topmost")
 
     def change_theme(self):
         self.cfg["theme"] = self.themevar.get()
@@ -2323,17 +2346,17 @@ class Widget:
 
     def retheme(self):
         self.grove_cache, self.sway_cache, self.tree_key = {}, {}, None
-        save_config(self.cfg)
+        self.cfg_seen = save_config(self.cfg, "theme", "project_themes")
         self.draw()
 
     def toggle_ambient(self):
         self.cfg["ambient"] = self.ambvar.get()
-        save_config(self.cfg)
+        self.cfg_seen = save_config(self.cfg, "ambient")
         self.draw()
 
     def toggle_pin(self):
         self.cfg["pinned"] = self.session.path if self.pinvar.get() else None
-        save_config(self.cfg)
+        self.cfg_seen = save_config(self.cfg, "pinned")
 
 
 def focus_claude():
@@ -2405,12 +2428,34 @@ def load_config():
     return cfg
 
 
-def save_config(cfg):
+def save_config(cfg, *keys, drop=()):
+    """Write just these keys into the config file, keeping whatever else is there: the desktop app
+    shares the file, so writing our whole (possibly stale) copy would undo its changes."""
+    disk = {}
     try:
-        with open(CONFIG, "w", encoding="utf-8") as fh:
-            json.dump(cfg, fh, indent=2)
+        with open(CONFIG, encoding="utf-8") as fh:
+            disk = json.load(fh)
+    except (OSError, ValueError):
+        pass
+    for k in keys:
+        disk[k] = cfg.get(k)
+    for k in drop:
+        disk.pop(k, None)
+    try:
+        tmp = CONFIG + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(disk, fh, indent=2)
+        os.replace(tmp, CONFIG)
     except OSError:
         pass
+    return config_mtime()
+
+
+def config_mtime():
+    try:
+        return os.path.getmtime(CONFIG)
+    except OSError:
+        return 0
 
 
 def main():

@@ -7,6 +7,8 @@ const os = require("os");
 const path = require("path");
 const { execFile } = require("child_process");
 const { Session, allTranscripts, openTranscripts, norm } = require("./data");
+const { fitInside } = require("./place");
+const { readFile, saveKeys } = require("./config");
 const { THEMES, THEME_NAMES } = require("../shared/themes");
 const STYLE_LABELS = { diorama: "Diorama", glass: "Glass", ink: "Ink" };
 
@@ -36,10 +38,7 @@ const DEV = process.argv.includes("--dev");
 
 let win = null;
 let cfg = loadConfig();
-if (process.env.BONSAI_THEME) { // dev aid: preview a theme everywhere without saving it
-  cfg.theme = process.env.BONSAI_THEME;
-  cfg.project_themes = {};
-}
+let configSeen = mtime(CONFIG);
 const sessions = new Map(); // transcript path -> Session
 let order = []; // grove order, oldest tree first so trees don't jump around
 let focusPath = null; // the renderer's focused session: gets git status and stays in the list
@@ -48,19 +47,35 @@ let newest = null;
 let signalSeen = mtime(SIGNAL);
 let drag = null;
 
+
 function loadConfig() {
-  try {
-    return { ...DEFAULTS, ...JSON.parse(fs.readFileSync(CONFIG, "utf8")) };
-  } catch {
-    return { ...DEFAULTS };
+  const c = { ...DEFAULTS, ...readFile(CONFIG) };
+  if (process.env.BONSAI_THEME) { // dev aid: preview a theme everywhere without saving it
+    c.theme = process.env.BONSAI_THEME;
+    c.project_themes = {};
   }
+  return c;
 }
 
-function saveConfig() {
+// Write just these keys, keeping whatever else is in the file: the Tk widget shares it, so writing our
+// whole (possibly stale) copy would undo its changes.
+function saveConfig(...keys) {
   try {
-    fs.mkdirSync(WIDGET_DIR, { recursive: true });
-    fs.writeFileSync(CONFIG, JSON.stringify(cfg, null, 2));
+    saveKeys(CONFIG, cfg, keys);
+    configSeen = mtime(CONFIG);
   } catch {}
+}
+
+// Pick up settings another app (the Tk widget) changed in the shared file.
+function reloadConfig() {
+  const m = mtime(CONFIG);
+  if (m === configSeen) return false;
+  configSeen = m;
+  const next = loadConfig();
+  if (JSON.stringify(next) === JSON.stringify(cfg)) return false;
+  cfg = next;
+  win?.setAlwaysOnTop(!!cfg.topmost);
+  return true;
 }
 
 function mtime(p) {
@@ -93,6 +108,7 @@ function activePaths() {
 }
 
 function refresh() {
+  reloadConfig();
   const events = [];
   let paths = activePaths();
   const pinned = cfg.pinned && fs.existsSync(cfg.pinned) ? cfg.pinned : null;
@@ -170,6 +186,18 @@ function anchor() {
   return [wa.x + wa.width - 24, wa.y + wa.height - 24];
 }
 
+// Where a w x h card goes: bottom-right corner at the anchor, but always wholly inside the work area of
+// the display nearest to it, so a removed or rearranged monitor can't strand it off-screen.
+function placement(w, h) {
+  return fitInside(anchor(), w, h, screen.getAllDisplays().map((d) => d.workArea));
+}
+
+function replace() {
+  if (!win || drag) return;
+  const [w, h] = win.getSize();
+  win.setBounds(placement(w, h));
+}
+
 function createWindow() {
   win = new BrowserWindow({
     // Opaque with Windows 11's own rounded corners and shadow: a transparent window would be composited on the
@@ -196,10 +224,7 @@ ipcMain.on("ready", () => refresh());
 // The card keeps its bottom-right corner fixed, so switching views grows it up and to the left.
 ipcMain.on("resize", (_, w, h) => {
   if (!win || drag) return;
-  const [r, b] = anchor();
-  w = Math.ceil(w);
-  h = Math.ceil(h);
-  win.setBounds({ x: Math.round(r - w), y: Math.round(b - h), width: w, height: h });
+  win.setBounds(placement(Math.ceil(w), Math.ceil(h)));
   if (!win.isVisible()) win.showInactive();
 });
 
@@ -222,7 +247,8 @@ ipcMain.on("drag-end", () => {
   const [x, y] = win.getPosition();
   const [w, h] = win.getSize();
   cfg.desktop = { right: x + w, bottom: y + h };
-  saveConfig();
+  saveConfig("desktop");
+  replace(); // dropped partly off-screen: pull it back in
 });
 
 ipcMain.on("background", (_, color) => win?.setBackgroundColor(color));
@@ -249,7 +275,7 @@ ipcMain.handle("compact", () => {
 const command = (cmd, value) => win?.webContents.send("command", { cmd, value });
 
 ipcMain.on("menu", (_, info) => {
-  const set = (k, v) => { cfg[k] = v; saveConfig(); push(); };
+  const set = (k, v) => { cfg[k] = v; saveConfig(k); push(); };
   const themeLabel = (n) => ({ Auto: "Auto (follows Windows)", Seasons: "Seasons (changes with the date)" })[n] || n;
   const themes = themeItems((n) => cfg.theme === n, (n) => set("theme", n), themeLabel);
   const template = [
@@ -294,7 +320,7 @@ ipcMain.on("menu", (_, info) => {
 
 ipcMain.on("toggle-zen", () => {
   cfg.zen = !cfg.zen;
-  saveConfig();
+  saveConfig("zen");
   push();
 });
 
@@ -348,11 +374,20 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(() => {
     createWindow();
     if (process.env.BONSAI_SHOTS) shots(process.env.BONSAI_SHOTS);
+    if (process.env.BONSAI_LEAK) { // dev aid: run the renderer's leak check, write the result, quit
+      win.webContents.once("did-finish-load", () => setTimeout(async () => {
+        const r = await win.webContents.executeJavaScript("window.__leakTest(40).catch((e) => ({ error: String(e.stack || e) }))")
+          .catch((e) => ({ error: String(e) }));
+        fs.writeFileSync(process.env.BONSAI_LEAK, JSON.stringify(r));
+        app.quit();
+      }, 4000));
+    }
     if (process.env.BONSAI_FPS) { // dev aid: pin the frame rate to measure what it costs
       win.webContents.on("did-finish-load", () => win.webContents.executeJavaScript(`window.__fpsCap = ${+process.env.BONSAI_FPS}`));
     }
     setInterval(refresh, POLL_MS);
     nativeTheme.on("updated", () => push());
+    for (const e of ["display-added", "display-removed", "display-metrics-changed"]) screen.on(e, replace);
     systemPreferences.on?.("accent-color-changed", () => push());
   });
   app.on("window-all-closed", () => app.quit());

@@ -362,5 +362,35 @@ class Controller {
 
 window.addEventListener("unhandledrejection", (e) => console.error(e.reason?.stack || e.reason));
 window.addEventListener("error", (e) => console.error(e.error?.stack || e.message));
+// Dev aid: create and destroy n scenes, and report GPU textures before and after (should match).
+window.__leakTest = async (n = 40) => {
+  const { Diorama, CROPS } = await import("./diorama.js");
+  const { treeFor } = await import("./tree.js");
+  const c = window.__bonsai, r = c.app.renderer;
+  const frames = (k) => new Promise((res) => { let i = 0; const f = () => (++i >= k ? res() : requestAnimationFrame(f)); f(); });
+  const count = () => r.texture.managedTextures.filter(Boolean).length; // removed entries leave null slots
+  await frames(10);
+  const before = count();
+  const beforeSet = new Set(r.texture.managedTextures);
+  for (let i = 0; i < n; i++) {
+    const d = new Diorama(c.app, { width: 124, crop: CROPS.grove, theme: c.widgetTheme(), tree: treeFor(`leak${i}.jsonl`) });
+    d.g = 0.5;
+    c.app.stage.addChild(d);
+    for (let k = 0; k < 3; k++) {
+      d.update({ dt: 200, ambient: false, working: false, sleeping: false, night: false, sky: null });
+      await frames(1);
+    }
+    d.destroy({ children: true });
+    await frames(3);
+  }
+  await frames(10);
+  const after = r.texture.managedTextures.filter((t) => !beforeSet.has(t));
+  const kinds = {};
+  for (const t of after) {
+    const k = `${t.constructor.name}:${t.label || ""}:${t.resource?.constructor?.name || "-"}:${Math.round(t.width)}x${Math.round(t.height)}`;
+    kinds[k] = (kinds[k] || 0) + 1;
+  }
+  return { before, after: count(), n, kinds };
+};
 window.__bonsai = new Controller();
 window.__bonsai.init();

@@ -112,7 +112,7 @@ test("tracks background jobs until they finish or are stopped", () => {
   assert.deepEqual(s.jobs, [{ id: "bg1", desc: "dev server" }]);
 });
 
-test("a rewritten (shorter) transcript is re-read from the start without firing stale events", { todo: "fixed in fix/correctness" }, () => {
+test("a rewritten (shorter) transcript is re-read from the start without firing stale events", () => {
   const file = tmpTranscript([...basicSession(), line.compact(1, 1)]);
   const s = new Session(file);
   s.refresh(WINDOW);
