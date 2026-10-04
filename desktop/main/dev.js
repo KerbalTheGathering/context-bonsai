@@ -4,6 +4,7 @@
 //   BONSAI_LEAK=<file>  create and destroy 40 scenes, write GPU texture counts before/after, then quit
 //   BONSAI_DPI=<file>   zoom to 150% (a stand-in for a higher-DPI monitor), write the renderer's resolution, quit
 //   BONSAI_FPS=<n>      pin the frame rate (to measure what a frame rate costs)
+//   BONSAI_HOUR=<h>     pin the clock's hour (e.g. 23 for a night scene)
 // (BONSAI_THEME and BONSAI_CFG, unsaved setting overrides, are read where the config loads.)
 const fs = require("fs");
 const path = require("path");
@@ -26,6 +27,7 @@ function setupDev(app, win, { command, setZen }) {
     win.webContents.on("did-finish-load", () => js("window.__probe = 1"));
   }
   if (env.BONSAI_FPS) win.webContents.on("did-finish-load", () => js(`window.__fpsCap = ${+env.BONSAI_FPS}`));
+  if (env.BONSAI_HOUR) win.webContents.on("did-finish-load", () => js(`window.__hour = ${+env.BONSAI_HOUR}`));
 
   if (env.BONSAI_SHOTS) {
     const dir = env.BONSAI_SHOTS;

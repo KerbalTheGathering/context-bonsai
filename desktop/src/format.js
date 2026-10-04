@@ -16,4 +16,11 @@ export function fmtAgo(sec) {
   return `idle ${Math.round(sec / 3600)}h`;
 }
 
+// How long ago a job last wrote output (as the rehydrate hook says it).
+export function fmtAge(sec) {
+  if (sec < 90) return `${Math.floor(sec)}s ago`;
+  if (sec < 5400) return `${Math.floor(sec / 60)}m ago`;
+  return `${(sec / 3600).toFixed(1)}h ago`;
+}
+
 export const nowSec = () => Date.now() / 1000;

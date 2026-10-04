@@ -266,6 +266,18 @@ const glass = {
     return true;
   },
 
+  // a glowing orb with a bright core
+  moon(d, m) {
+    const halo = new Sprite(d.tex.glow);
+    halo.anchor.set(0.5);
+    halo.scale.set(0.75);
+    halo.tint = hex(d.theme.colors.glow);
+    halo.blendMode = d.theme.light ? "normal" : "add";
+    halo.alpha = d.theme.light ? 0.5 : 0.8;
+    m.addChild(halo, new Graphics().circle(0, 0, 11).fill({ color: 0xffffff, alpha: d.theme.light ? 0.95 : 0.9 })
+      .circle(0, 0, 11).stroke({ width: 1, color: d.theme.colors.glow, alpha: 0.9 }));
+  },
+
   tally(d, cc) {
     const c = d.theme.colors;
     for (let i = 0; i < Math.min(cc, 12); i++) {
@@ -399,6 +411,15 @@ const ink = {
     seal.position.set(x1 - 58, 448 - 44);
     seal.rotation = -0.03;
     d.back.addChild(seal);
+  },
+
+  // the moon left as bare paper inside a faint wash, as sumi-e paints it
+  moon(d, m) {
+    const c = d.theme.colors, g = new Graphics();
+    g.circle(0, 0, 24).fill({ color: c.bark, alpha: 0.07 }).circle(0, 0, 13).fill(c.wall);
+    brush(g, Array.from({ length: 24 }, (_, i) => [Math.cos(-0.6 + i * 0.22) * 13, Math.sin(-0.6 + i * 0.22) * 13]),
+      0.6, 1.4, hex(c.bark), 0.35, 31);
+    m.addChild(g);
   },
 
   tally(d, cc) { // brush ticks on the tray

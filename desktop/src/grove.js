@@ -82,7 +82,7 @@ class Card extends Container {
     this.scene.g = this.g;
     this.scene.world.x = -CROPS.grove[0] * this.scene.k + parallax * 6; // depth while the carousel moves
     const age = nowSec() - (s.mtime || 0); // each tree sways only while its own session works
-    this.scene.update({ ...ctx, working: age < 8, sleeping: age > 1800 });
+    this.scene.update({ ...ctx, working: age < 8, sleeping: age > 1800, night: ctx.night || age > 1800 });
     fit(this.pct, `${Math.round(this.g * 100)}%`);
     recolor(this.pct, col.ink);
     this.pct.position.set(CARD_W / 2 - this.pct.width / 2, this.pctY);

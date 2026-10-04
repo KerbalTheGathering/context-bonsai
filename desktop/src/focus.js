@@ -2,7 +2,7 @@
 // meter, status with the Compact button, then context-over-time and grouped stats.
 import { Container, Graphics } from "pixi.js";
 import { CROPS, Diorama } from "./diorama.js";
-import { fmtAgo, fmtDur, fmtK, fmtTok, nowSec, plural } from "./format.js";
+import { fmtAge, fmtAgo, fmtDur, fmtK, fmtTok, nowSec, plural } from "./format.js";
 import { clamp, stageFor, treeFor } from "./tree.js";
 import { styleOf, vgrad } from "./styles.js";
 import { Button, C, DISPLAY, MONO, Runs, ease, fit, label, recolor, tween } from "./ui.js";
@@ -56,7 +56,8 @@ export class FocusView extends Container {
     this.jobs = new Container();
     this.jobsBg = new Graphics();
     this.jobsTxt = label("", 11, 0xffffff);
-    this.jobs.addChild(this.jobsBg, this.jobsTxt);
+    this.jobsSub = label("", 9.5, 0xffffff, { family: MONO });
+    this.jobs.addChild(this.jobsBg, this.jobsTxt, this.jobsSub);
     this.status = new Container();
     this.status.addChild(this.dot, this.stage_, this.advice, this.compact, this.jobs);
 
@@ -225,14 +226,21 @@ export class FocusView extends Container {
     y += 32;
     this.jobs.visible = !!s?.jobs?.length;
     if (this.jobs.visible) { // only while something is running
-      const nj = s.jobs.length, desc = s.jobs[0].desc || "";
+      const nj = s.jobs.length, job = s.jobs[0], desc = job.desc || "";
       recolor(this.jobsTxt, col.warn);
       fit(this.jobsTxt, `◷  ${nj} ${plural(nj, "job")} running` + (desc ? ` · ${desc}` : ""), W - pad * 2 - 20);
       this.jobsTxt.position.set(10, 2);
-      this.jobsBg.clear().roundRect(0, 0, this.jobsTxt.width + 20, 20, 10).fill({ color: col.warn, alpha: 0.08 })
+      // and what it last printed, so a stuck or finished-but-unnoticed job is visible at a glance
+      const detail = job.age == null ? "" : `${fmtAge(job.age)}: ${job.last || "(no output yet)"}`;
+      this.jobsSub.visible = !!detail;
+      recolor(this.jobsSub, col.muted);
+      fit(this.jobsSub, detail, W - pad * 2 - 20);
+      this.jobsSub.position.set(10, 20);
+      const h = detail ? 36 : 20, w = Math.max(this.jobsTxt.width, detail ? this.jobsSub.width : 0) + 20;
+      this.jobsBg.clear().roundRect(0, 0, w, h, 10).fill({ color: col.warn, alpha: 0.08 })
         .stroke({ width: 1, color: col.warn, alpha: 0.7 });
       this.jobs.position.set(pad, 30);
-      y += 28;
+      y += h + 8;
     }
 
     // tokens: context per call over the session, then peak / avg / total

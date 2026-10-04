@@ -101,6 +101,8 @@ export class Diorama extends Container {
     this.glow = new Container();
     this.glow.blendMode = "add";
     this.sky = new Graphics();
+    this.moon = new Container(); // at night, in the top right corner; each style draws its own
+    this.moon.alpha = 0;
     this.tools = new Container();
 
     this.treeRoot.position.set(300, 398);
@@ -109,7 +111,7 @@ export class Diorama extends Container {
     this.treeRoot.addChild(this.treeInner);
     this.world.addChild(this.backSprite, this.backFx, this.tally, this.pileLayer, this.shadow, this.treeRoot, this.stillSprite,
       this.fx, this.glow,
-      this.sky, this.tools);
+      this.sky, this.moon, this.tools);
     this.addChild(this.world);
     this.clip = new Graphics();
     this.addChild(this.clip);
@@ -216,6 +218,9 @@ export class Diorama extends Container {
     this.filters = t.pixel ? [pixelateFilter(Math.max(2, Math.round(3 * this.k * devicePixelRatio)))] : null;
     this.sky.clear().rect(x0, y0, x1 - x0, y1 - y0).fill(0xffffff);
     this.sky.alpha = 0;
+    this.moon.removeChildren().forEach((c) => c.destroy());
+    (S.moon || ((d) => d.dioramaMoon()))(this, this.moon);
+    this.moon.position.set(x1 - 72, y0 + 52);
     const echo = S.woodEcho?.(this);
     this.woodEcho.visible = !!echo;
     if (echo) {
@@ -225,6 +230,15 @@ export class Diorama extends Container {
       this.woodEcho.filters = [new BlurFilter({ strength: echo.blur, quality: 3 })];
     }
     if (!S.shadow) this.shadow.visible = false;
+  }
+
+  // the Tk widget's moon: two soft halos, a pale disc, three craters
+  dioramaMoon() {
+    const m = new Graphics();
+    m.circle(0, 0, 26).fill({ color: 0xf0ecd6, alpha: 18 / 255 }).circle(0, 0, 19).fill({ color: 0xf0ecd6, alpha: 34 / 255 });
+    m.circle(0, 0, 12).fill({ color: 0xf0ecd6, alpha: 0.92 });
+    for (const [cx, cy, cr] of [[-4, -3, 2.6], [3, 4, 1.8], [5, -4, 1.3]]) m.circle(cx, cy, cr).fill({ color: 0xd6d0b8, alpha: 0.92 });
+    this.moon.addChild(m);
   }
 
   // wall, shelf, wooden stand, a glazed pot with moss
@@ -660,6 +674,7 @@ export class Diorama extends Container {
     else this.swayTree(t, w);
     this.updateShafts(ctx, dt, t);
     this.updateSky(ctx, dt);
+    this.updateMoon(ctx, dt);
     this.updateAmbient(ctx, dt);
     this.updateTools(ctx, dt, now);
     this.updateParticles(dt, now);
@@ -692,6 +707,13 @@ export class Diorama extends Container {
       s.alpha += (want - s.alpha) * Math.min(1, dt / 600);
       s.tint = hex(this.theme.colors.glow);
     }
+  }
+
+  updateMoon(ctx, dt) {
+    const want = ctx.night ? 1 : 0;
+    this.moonMoving = Math.abs(want - this.moon.alpha) > 0.01;
+    this.moon.alpha += (want - this.moon.alpha) * Math.min(1, dt / 1200);
+    this.moon.visible = this.moon.alpha > 0.01;
   }
 
   updateSky(ctx, dt) {
@@ -877,7 +899,7 @@ export class Diorama extends Container {
   // the aurora, a sky or light fading), 0 = nothing, so nothing needs drawing.
   get motion() {
     if (!this.still || this.phase !== "idle" || this.particles.some((p) => p.kind !== "fly" && p.kind !== "mote")) return 2;
-    if (this.particles.length || this.auroraOn || this.skyMoving || this.shaftsMoving
+    if (this.particles.length || this.auroraOn || this.skyMoving || this.shaftsMoving || this.moonMoving
       || this.can.alpha > 0.01 || this.shears.alpha > 0.01) return 1;
     return 0;
   }

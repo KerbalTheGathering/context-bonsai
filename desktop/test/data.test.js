@@ -126,3 +126,20 @@ test("a rewritten (shorter) transcript is re-read from the start without firing 
   assert.equal(s.seenCc, 0, "seen count re-baselined");
   assert.equal(typeof s.onChange, "function", "change callback kept");
 });
+
+test("finds a job's output file: last line without color codes, and its age", () => {
+  const os = require("os");
+  const path = require("path");
+  const { jobOutput } = require("../main/data.js");
+  const transcript = tmpTranscript([]);
+  const proj = path.basename(path.dirname(transcript));
+  const tasks = path.join(os.tmpdir(), "claude", proj, "session-1", "tasks");
+  fs.mkdirSync(tasks, { recursive: true });
+  fs.writeFileSync(path.join(tasks, "bg1.output"), "starting\n\x1b[32mready\x1b[0m on :3000\r\n\n");
+  const j = jobOutput(transcript, "bg1");
+  assert.equal(j.last, "ready on :3000");
+  assert.ok(j.age >= 0 && j.age < 60);
+  assert.ok(j.out.endsWith("bg1.output"));
+  assert.deepEqual(jobOutput(transcript, "missing"), { out: null, last: "", age: null });
+  fs.rmSync(path.join(os.tmpdir(), "claude", proj), { recursive: true, force: true });
+});

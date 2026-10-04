@@ -312,7 +312,7 @@ class Controller {
   // The clock's tint over the scene: dawn, day, dusk, night; deeper when the session sleeps.
   sky() {
     if (this.sleeping()) return { color: 0x0a0e24, alpha: 0.4 };
-    const d = new Date(), h = d.getHours() + d.getMinutes() / 60;
+    const h = this.hour();
     if (h >= 5 && h < 8) return { color: 0xffa06e, alpha: 0.12 * (1 - Math.abs(h - 6.5) / 1.5) };
     if (h >= 8 && h < 17) return { color: 0xffffff, alpha: 0 };
     if (h >= 17 && h < 19) return { color: 0xff8246, alpha: (0.1 * (h - 17)) / 2 };
@@ -323,8 +323,15 @@ class Controller {
     return { color: 0x192350, alpha: 0.22 };
   }
 
+  // the local hour, as a fraction (dev aid: BONSAI_HOUR pins it)
+  hour() {
+    if (window.__hour != null) return window.__hour;
+    const d = new Date();
+    return d.getHours() + d.getMinutes() / 60;
+  }
+
   night() {
-    const h = new Date().getHours();
+    const h = this.hour();
     return this.sleeping() || h >= 21 || h < 5;
   }
 
