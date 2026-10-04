@@ -300,6 +300,9 @@ ipcMain.on("menu", (_, info) => {
       { label: info.count > 1 ? "Grove (every active session)" : "Grove (only one session active)", type: "radio",
         checked: info.view === "grove", enabled: info.count > 1, click: () => command("view", "grove") },
     ] },
+    { label: "Grove order", enabled: info.count > 1, submenu: [
+      ["seen", "As sessions appear"], ["fullest", "Fullest first"], ["recent", "Most recent first"],
+    ].map(([v, label]) => ({ label, type: "radio", checked: (cfg.grove_sort || "seen") === v, click: () => set("grove_sort", v) })) },
     { label: "Zen mode", type: "checkbox", checked: !!cfg.zen, click: (m) => set("zen", m.checked) },
     { label: "Ambient animation", type: "checkbox", checked: cfg.ambient !== false, click: (m) => set("ambient", m.checked) },
     { label: "Rescan sessions", click: () => { rescan(); command("rescanned", order.length); } },
@@ -325,7 +328,7 @@ if (!app.requestSingleInstanceLock()) {
   app.on("second-instance", () => app.quit());
   app.whenReady().then(() => {
     createWindow();
-    setupDev(app, win, { command, setZen: (on) => { cfg.zen = on; push(); } });
+    setupDev(app, win, { command, setZen: (on) => { cfg.zen = on; push(); }, setCfg: (k, v) => { cfg[k] = v; push(); } });
     setInterval(refresh, POLL_MS);
     nativeTheme.on("updated", () => push());
     for (const e of ["display-added", "display-removed", "display-metrics-changed"]) screen.on(e, replace);

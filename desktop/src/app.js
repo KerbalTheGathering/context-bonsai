@@ -74,8 +74,8 @@ class Controller {
   onState(st) {
     this.cfg = st.cfg;
     this.system = st.system;
-    this.order = st.order;
     this.sessions = new Map(st.sessions.map((s) => [s.path, s]));
+    this.order = this.sorted(st.order);
     this.newest = st.newest;
     const pinned = this.cfg.pinned && this.sessions.has(this.cfg.pinned) ? this.cfg.pinned : null;
     if (this.phase === "idle" && (this.follow || !this.focusPath)) {
@@ -123,6 +123,13 @@ class Controller {
         until: Date.now() / 1000 + 6 };
       this.relayout();
     }
+  }
+
+  // The grove's order: as trees first appeared (the default), fullest first, or most recently active first.
+  sorted(order) {
+    const by = { fullest: (s) => -s.g, recent: (s) => -s.mtime }[this.cfg.grove_sort];
+    if (!by) return order;
+    return [...order].sort((a, b) => by(this.sessions.get(a) || {}) - by(this.sessions.get(b) || {}) || order.indexOf(a) - order.indexOf(b));
   }
 
   focusSession() {
@@ -368,6 +375,26 @@ class Controller {
     } else this.focus.update(ctx);
   }
 
+  // Keyboard (once the widget has been clicked): arrows page the grove or step through sessions,
+  // Enter opens the tree under the pointer (or the first in view), Esc goes back to the grove, Z is zen.
+  onKey(e) {
+    const step = { ArrowRight: 1, ArrowLeft: -1 }[e.key];
+    if (step && this.view === "grove") this.grove.page(step);
+    else if (step && this.order.length > 1) {
+      const i = this.order.indexOf(this.focusPath);
+      this.follow = false;
+      this.setFocus(this.order[(i + step + this.order.length) % this.order.length]);
+      this.focus.enter();
+    } else if (e.key === "Enter" && this.view === "grove") {
+      const path = this.grove.hover || this.order[Math.round(this.grove.target)];
+      if (path) this.openFocus(path, this.grove.cards.get(path));
+    } else if (e.key === "Escape" && this.view === "focus") this.showGrove();
+    else if (e.key.toLowerCase() === "z" && !e.ctrlKey && !e.altKey) api.toggleZen();
+    else return;
+    e.preventDefault();
+    this.relayout();
+  }
+
   // --- input: drag the window from anywhere that isn't a control; right-click for the menu ---
   bindInput() {
     const stage = this.app.stage;
@@ -395,9 +422,10 @@ class Controller {
       e.preventDefault();
       const s = this.focusSession();
       api.menu({ view: this.view, count: this.order.length, phase: this.phase, focusPath: this.focusPath,
-        focusName: s?.cwd ? s.name : null });
+        focusName: s?.cwd ? s.name : null, groveSort: this.cfg.grove_sort || "seen" });
     });
     window.addEventListener("dblclick", () => api.toggleZen());
+    window.addEventListener("keydown", (e) => this.onKey(e));
     document.addEventListener("mouseenter", () => { this.hovering = true; this.relayout(); });
     document.addEventListener("mouseleave", () => { this.hovering = false; this.grove.hover = null; this.relayout(); });
   }

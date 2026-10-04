@@ -390,7 +390,7 @@ function jobOutput(transcript, taskId) {
       tail = buf.toString("utf8").replace(ANSI, "");
     } catch {}
     const lines = tail.split(/[\r\n]+/).map((l) => l.trim()).filter(Boolean);
-    return { out, last: (lines[lines.length - 1] || "").slice(0, 160), age: Date.now() / 1000 - st.mtimeMs / 1000 };
+    return { out, last: (lines[lines.length - 1] || "").slice(0, 160), age: Math.max(0, Date.now() / 1000 - st.mtimeMs / 1000) }; // file times can run a hair ahead of the clock
   }
   return { out: null, last: "", age: null };
 }

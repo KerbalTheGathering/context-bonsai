@@ -403,7 +403,7 @@ const ink = {
     // a red seal in the corner
     const seal = new Container();
     const stamp = new Graphics().roundRect(0, 0, 30, 30, 3).fill({ color: c.seal || c.crit, alpha: 0.85 });
-    const chars = new Text({ text: "盆\n栽", style: { fontFamily: ink.display, fontSize: 12, fill: c.wall, lineHeight: 13,
+    const chars = new Text({ text: "ç›†\næ ½", style: { fontFamily: ink.display, fontSize: 12, fill: c.wall, lineHeight: 13,
       fontWeight: "700", align: "center" } });
     chars.anchor.set(0.5);
     chars.position.set(15, 15);

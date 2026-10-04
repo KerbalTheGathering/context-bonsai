@@ -238,6 +238,7 @@ export class GroveView extends Container {
     const p = this.strip.toLocal(e.global);
     const i = Math.floor((p.x + GAP / 2) / (CARD_W + GAP));
     const path = this.ctrl.order[i];
+    if (!path) return;
     if (path) this.ctrl.openFocus(path, this.cards.get(path));
   }
 
@@ -258,7 +259,10 @@ export class GroveView extends Container {
         this.cards.set(p, card);
         this.strip.addChild(card);
       }
-      card.x = i * (CARD_W + GAP);
+      const x = i * (CARD_W + GAP);
+      if (card.slotX === undefined) card.x = x; // new cards start in place; moved ones slide to their new slot
+      else if (card.slotX !== x) tween(card, { x }, 450, { fn: ease.inOut });
+      card.slotX = x;
       card.layout(ctrl.sessions.get(p), ctrl.themeFor(ctrl.sessions.get(p)), this.zen);
     });
     this.target = clamp(this.target, 0, this.last);

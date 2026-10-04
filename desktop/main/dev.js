@@ -5,13 +5,14 @@
 //   BONSAI_DPI=<file>   zoom to 150% (a stand-in for a higher-DPI monitor), write the renderer's resolution, quit
 //   BONSAI_FPS=<n>      pin the frame rate (to measure what a frame rate costs)
 //   BONSAI_HOUR=<h>     pin the clock's hour (e.g. 23 for a night scene)
+//   BONSAI_KEYS=<file>  press keys and switch the grove order, write what happened, quit
 // (BONSAI_THEME and BONSAI_CFG, unsaved setting overrides, are read where the config loads.)
 const fs = require("fs");
 const path = require("path");
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function setupDev(app, win, { command, setZen }) {
+function setupDev(app, win, { command, setZen, setCfg }) {
   const env = process.env;
   const js = (code) => win.webContents.executeJavaScript(code);
   const loaded = new Promise((r) => win.webContents.once("did-finish-load", r));
@@ -70,6 +71,30 @@ function setupDev(app, win, { command, setZen }) {
       const r = await js("window.__leakTest(40).catch((e) => ({ error: String(e.stack || e) }))");
       fs.writeFileSync(env.BONSAI_LEAK, JSON.stringify(r));
     }, env.BONSAI_LEAK);
+  }
+
+  if (env.BONSAI_KEYS) {
+    run(async () => {
+      const state = () => js(`(() => { const c = window.__bonsai;
+        return { view: c.view, target: c.grove.target, focus: c.focusPath && c.focusPath.slice(-12),
+          order: c.order.map((p) => +c.sessions.get(p).g.toFixed(3)) }; })()`);
+      const key = async (k) => {
+        win.webContents.sendInputEvent({ type: "keyDown", keyCode: k });
+        win.webContents.sendInputEvent({ type: "keyUp", keyCode: k });
+        await wait(700);
+        return { key: k, ...(await state()) };
+      };
+      win.focus();
+      command("view", "grove");
+      await wait(1200);
+      const steps = [{ start: await state() }];
+      for (const k of ["Right", "Right", "Left", "Enter", "Right", "Escape"]) steps.push(await key(k));
+      setCfg("grove_sort", "fullest");
+      await wait(2500);
+      steps.push({ sorted: "fullest", ...(await state()) });
+      setCfg("grove_sort", undefined);
+      fs.writeFileSync(env.BONSAI_KEYS, JSON.stringify(steps, null, 1));
+    }, env.BONSAI_KEYS);
   }
 
   if (env.BONSAI_DPI) {
