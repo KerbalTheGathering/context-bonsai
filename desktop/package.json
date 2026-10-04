@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "context-bonsai",
   "version": "0.1.0",
   "private": true,
@@ -8,7 +8,8 @@
     "build": "esbuild src/app.js --bundle --format=esm --target=chrome120 --outfile=dist/app.js --sourcemap",
     "watch": "npm run build -- --watch",
     "start": "npm run build && electron .",
-    "dev": "npm run build && electron . --dev"
+    "dev": "npm run build && electron . --dev",
+    "test": "node --test \"test/*.test.js\""
   },
   "dependencies": {
     "pixi.js": "^8.22.0"
