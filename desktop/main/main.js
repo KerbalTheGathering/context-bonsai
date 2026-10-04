@@ -37,6 +37,14 @@ const GROVE_MAX = 12;
 const LIVE_SECONDS = 15; // how often to re-read the open-session registry
 const POLL_MS = 2000;
 const DEV = process.argv.includes("--dev");
+// packaged, the icon sits next to the app; run from the clone, it's the widget's
+const ICON = [path.join(__dirname, "..", "bonsai.ico"), path.join(__dirname, "..", "..", "widget", "bonsai.ico")]
+  .find((p) => fs.existsSync(p));
+
+// Start with Windows. Run from the clone (electron.exe <app dir>), the login item needs the app dir too.
+function loginItem() {
+  return { path: process.execPath, args: process.defaultApp ? [path.resolve(process.argv[1] || ".")] : [] };
+}
 
 let win = null;
 let cfg = loadConfig();
@@ -207,7 +215,7 @@ function createWindow() {
     // CPU every frame.
     width: 300, height: 420, show: false, frame: false, transparent: false, roundedCorners: true, hasShadow: true,
     resizable: false, maximizable: false, fullscreenable: false, skipTaskbar: true, alwaysOnTop: !!cfg.topmost,
-    title: "Context Bonsai", backgroundColor: "#1A201F", icon: path.join(__dirname, "..", "..", "widget", "bonsai.ico"),
+    title: "Context Bonsai", backgroundColor: "#1A201F", icon: ICON,
     webPreferences: { preload: path.join(__dirname, "preload.js"), contextIsolation: true, nodeIntegration: false },
   });
   win.loadFile(path.join(__dirname, "..", "index.html"));
@@ -275,6 +283,8 @@ ipcMain.on("menu", (_, info) => {
   const themeLabel = (n) => ({ Auto: "Auto (follows Windows)", Seasons: "Seasons (changes with the date)" })[n] || n;
   const themes = themeItems((n) => cfg.theme === n, (n) => set("theme", n), themeLabel);
   const template = [
+    { label: "Start with Windows", type: "checkbox", checked: app.getLoginItemSettings(loginItem()).openAtLogin,
+      click: (m) => app.setLoginItemSettings({ ...loginItem(), openAtLogin: m.checked }) },
     { label: "Keep on top", type: "checkbox", checked: !!cfg.topmost,
       click: (m) => { set("topmost", m.checked); win.setAlwaysOnTop(m.checked); } },
     { label: "Pin this session", type: "checkbox", checked: !!info.focusPath && cfg.pinned === info.focusPath,
@@ -329,7 +339,7 @@ if (!app.requestSingleInstanceLock()) {
   app.on("second-instance", () => app.quit());
   app.whenReady().then(() => {
     createWindow();
-    setupDev(app, win, { command, setZen: (on) => { cfg.zen = on; push(); }, setCfg: (k, v) => { cfg[k] = v; push(); } });
+    setupDev(app, win, { command, setZen: (on) => { cfg.zen = on; push(); }, setCfg: (k, v) => { cfg[k] = v; push(); }, loginItem });
     setInterval(refresh, POLL_MS);
     nativeTheme.on("updated", () => push());
     for (const e of ["display-added", "display-removed", "display-metrics-changed"]) screen.on(e, replace);

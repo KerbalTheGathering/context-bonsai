@@ -2,6 +2,7 @@
   "name": "context-bonsai",
   "version": "0.1.0",
   "private": true,
+  "productName": "Context Bonsai",
   "description": "Context Bonsai desktop widget: a living bonsai per Claude Code session, rendered with PixiJS.",
   "main": "main/main.js",
   "scripts": {

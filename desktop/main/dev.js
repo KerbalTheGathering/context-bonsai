@@ -6,13 +6,14 @@
 //   BONSAI_FPS=<n>      pin the frame rate (to measure what a frame rate costs)
 //   BONSAI_HOUR=<h>     pin the clock's hour (e.g. 23 for a night scene)
 //   BONSAI_KEYS=<file>  press keys and switch the grove order, write what happened, quit
+//   BONSAI_LOGIN=<file> turn Start with Windows on and straight back off, write what was read, quit
 // (BONSAI_THEME and BONSAI_CFG, unsaved setting overrides, are read where the config loads.)
 const fs = require("fs");
 const path = require("path");
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function setupDev(app, win, { command, setZen, setCfg }) {
+function setupDev(app, win, { command, setZen, setCfg, loginItem }) {
   const env = process.env;
   const js = (code) => win.webContents.executeJavaScript(code);
   const loaded = new Promise((r) => win.webContents.once("did-finish-load", r));
@@ -95,6 +96,17 @@ function setupDev(app, win, { command, setZen, setCfg }) {
       setCfg("grove_sort", undefined);
       fs.writeFileSync(env.BONSAI_KEYS, JSON.stringify(steps, null, 1));
     }, env.BONSAI_KEYS);
+  }
+
+  if (env.BONSAI_LOGIN) {
+    run(async () => {
+      const read = () => app.getLoginItemSettings(loginItem()).openAtLogin;
+      const before = read();
+      app.setLoginItemSettings({ ...loginItem(), openAtLogin: true });
+      const on = read();
+      app.setLoginItemSettings({ ...loginItem(), openAtLogin: before });
+      fs.writeFileSync(env.BONSAI_LOGIN, JSON.stringify({ before, on, after: read(), item: loginItem() }));
+    }, env.BONSAI_LOGIN);
   }
 
   if (env.BONSAI_DPI) {

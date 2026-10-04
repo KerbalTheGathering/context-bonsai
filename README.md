@@ -20,7 +20,8 @@ It needs Python 3 with Pillow (`pip install pillow`), Node.js, and the `claude` 
 2. **Updates `~/.claude/settings.json`,** after backing it up and only with your OK:
    - It removes old hand-installed entries for these hooks, which would otherwise fire twice.
    - It points the status line at the clone. Plugins can't provide a status line, and if you already use a status line of your own, it's left alone.
-3. **Builds the desktop app.** It creates the Start menu shortcuts **Context Bonsai** (the desktop app) and **Context Bonsai (classic)** (the Tk widget), and records the clone's location in `~/.claude/widget/install.json` for the commands.
+3. **Builds the desktop app** and installs a standalone copy in `%LOCALAPPDATA%\Programs\ContextBonsai`, so the widget keeps working if the clone moves. It's Electron's runtime (about 300 MB) plus the app.
+4. **Creates Start menu shortcuts:** **Context Bonsai** (the desktop app) and **Context Bonsai (classic)** (the Tk widget). It also records the clone's location in `~/.claude/widget/install.json` for the commands.
 
 Hooks take effect in sessions started afterwards.
 
@@ -70,7 +71,7 @@ Plus Auto (follows Windows light/dark mode and accent color) and Seasons (change
 **Controls:**
 - Drag to move. The card stays anchored at its bottom-right corner, and is always kept on a screen.
 - Double-click or Z toggles zen mode (just the trees).
-- Right-click for Keep on top, Pin this session, Theme, View, Grove order, Zen mode, Ambient animation, Rescan sessions, Compact, Preview compact animation, and Quit.
+- Right-click for Start with Windows, Keep on top, Pin this session, Theme, View, Grove order, Zen mode, Ambient animation, Rescan sessions, Compact, Preview compact animation, and Quit.
 - Opening the shortcut again closes it.
 
 **CPU:** it draws only when something changes. Idle, it measured 0.5–3% of one CPU core.
@@ -87,7 +88,7 @@ It assumes a 1M-token context window; change `window` in `~/.claude/widget/bonsa
 | `plugin/` | The Claude Code plugin: manifest, hooks, status line, commands. |
 | `desktop/` | The Electron + PixiJS widget. |
 | `widget/` | The classic Tk widget and the shared icon. |
-| `scripts/` | The installer and the settings migration it uses. |
+| `scripts/` | The installer, the settings migration it uses, and the app packager. |
 | `bonsai-page/` | The HTML snapshot page behind `/context-bonsai:snapshot`. |
 | `tests/`, `desktop/test/` | Python and Node test suites, run by CI. |
 | `tools/` | Dev helpers: the tree parity fixture and the icon builder. |

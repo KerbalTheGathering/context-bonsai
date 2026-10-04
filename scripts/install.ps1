@@ -8,7 +8,8 @@
 # Run with no switches to see the plan and be asked before anything changes.
 # It: adds this clone as a plugin marketplace and installs (or updates) the context-bonsai plugin, which
 # provides the compaction hooks; moves ~/.claude/settings.json off the old hand-installed hooks and points
-# the status line at the clone (backing the file up first); builds the desktop app; creates the Start menu
+# the status line at the clone (backing the file up first); builds the desktop app and installs a standalone
+# copy in %LOCALAPPDATA%\Programs\ContextBonsai (so it doesn't depend on the clone); creates the Start menu
 # shortcuts; and records the clone's location in ~/.claude/widget/install.json for the plugin's commands.
 param([switch]$Plan, [switch]$Yes, [switch]$Uninstall, [switch]$SkipApp)
 
@@ -18,7 +19,9 @@ $claudeDir = Join-Path $HOME '.claude'
 $data = Join-Path $claudeDir 'widget'
 $programs = [Environment]::GetFolderPath('Programs')
 $app = Join-Path $repo 'desktop'
-$electron = Join-Path $app 'node_modules\electron\dist\electron.exe'
+$packaged = Join-Path $env:LOCALAPPDATA 'Programs\ContextBonsai'
+$exe = Join-Path $packaged 'ContextBonsai.exe'
+$runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $market = 'context-bonsai'
 $pluginId = 'context-bonsai@context-bonsai'
 
@@ -69,9 +72,12 @@ if ($settingsPlan.changes.Count) {
     $settingsPlan.changes | ForEach-Object { Write-Host "    * $_" }
 } else { Step "no settings.json changes needed" }
 if (-not $SkipApp) {
-    if ($Uninstall) { Step "remove the Start menu shortcuts and $data\install.json (your widget settings stay)" }
-    else {
+    if ($Uninstall) {
+        Step "close the widget and remove $packaged, its Start with Windows entry, the Start menu shortcuts"
+        Step "remove $data\install.json (your widget settings in bonsai.json stay)"
+    } else {
         Step "build the desktop app in $app (npm install, npm run build)"
+        Step "install it standalone in $packaged (closing it first if it's running)"
         Step "Start menu: 'Context Bonsai' opens the desktop app, 'Context Bonsai (classic)' the Tk widget"
         Step "record this clone in $data\install.json for /context-bonsai:widget and :setup"
     }
@@ -104,18 +110,29 @@ if (-not $SkipApp) {
     $lnkMain = Join-Path $programs 'Context Bonsai.lnk'
     $lnkClassic = Join-Path $programs 'Context Bonsai (classic).lnk'
     if ($Uninstall) {
-        foreach ($f in $lnkMain, $lnkClassic, (Join-Path $data 'install.json')) { if (Test-Path $f) { Remove-Item $f } }
+        Get-Process ContextBonsai -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe } | Stop-Process -Force
+        Start-Sleep -Milliseconds 300
+        $run = Get-ItemProperty $runKey -ErrorAction SilentlyContinue
+        if ($run) {
+            $run.PSObject.Properties | Where-Object { "$($_.Value)" -like "*$exe*" } |
+                ForEach-Object { Remove-ItemProperty $runKey -Name $_.Name }
+        }
+        foreach ($f in $lnkMain, $lnkClassic, (Join-Path $data 'install.json'), $packaged) {
+            if (Test-Path $f) { Remove-Item $f -Recurse -Force }
+        }
     } else {
         Push-Location $app
         try {
             Native 'npm install' npm install --no-fund --no-audit | Out-Null
             Native 'Building the desktop app' npm run build | Out-Null
         } finally { Pop-Location }
+        Native 'Installing the standalone app' powershell -NoProfile -ExecutionPolicy Bypass `
+            -File (Join-Path $repo 'scripts\package-app.ps1') -Dest $packaged | Out-Null
         $icon = Join-Path $repo 'widget\bonsai.ico'
         $classicScript = Join-Path $repo 'widget\bonsai_widget.pyw'
         $shell = New-Object -ComObject WScript.Shell
         foreach ($s in @(
-            @($lnkMain, $electron, "`"$app`"", $app, 'Show or hide Context Bonsai'),
+            @($lnkMain, $exe, '', $packaged, 'Show or hide Context Bonsai'),
             @($lnkClassic, $pythonw, "`"$classicScript`"", (Join-Path $repo 'widget'), 'Show or hide the classic Tk Context Bonsai widget'))) {
             $sc = $shell.CreateShortcut($s[0])
             $sc.TargetPath = $s[1]; $sc.Arguments = $s[2]; $sc.WorkingDirectory = $s[3]
@@ -125,7 +142,7 @@ if (-not $SkipApp) {
         New-Item -ItemType Directory -Force $data | Out-Null
         $version = (Get-Content (Join-Path $repo 'plugin\.claude-plugin\plugin.json') -Raw | ConvertFrom-Json).version
         @{ repo = $repo; version = $version
-           launch = @{ file = $electron; args = "`"$app`"" }
+           launch = @{ file = $exe; args = '' }
            classic = @{ file = $pythonw; args = "`"$classicScript`"" } } |
             ConvertTo-Json -Depth 4 | Set-Content (Join-Path $data 'install.json') -Encoding UTF8
     }
