@@ -192,9 +192,14 @@ class Session {
     let changed = mtime !== this.mtime;
     if (changed) {
       this.mtime = mtime;
-      if (st.size < this.offset) Object.assign(this, new Session(this.path), { mtime }); // rewritten
+      const rewritten = st.size < this.offset;
+      if (rewritten) this.reset(mtime);
       this.scanNew(st.size);
       this.readTokens(st.size);
+      if (rewritten && this.seenCc !== undefined) { // what was already shown isn't news
+        this.seenCc = this.compactions;
+        this.seenRestores = this.restores;
+      }
       this.jobs = [...this.launched].filter(([tid]) => !this.finished.has(tid))
         .map(([tid, tuid]) => ({ id: tid, desc: this.jobDesc.get(tuid) || "" }));
     }
@@ -210,6 +215,12 @@ class Session {
       });
     }
     return changed;
+  }
+
+  // The file was rewritten (it shrank): start over, keeping who's listening.
+  reset(mtime) {
+    const keep = { onChange: this.onChange, seenCc: this.seenCc, seenRestores: this.seenRestores, window: this.window };
+    Object.assign(this, new Session(this.path), keep, { mtime });
   }
 
   // Count compactions, gather stats and the cwd, reading only what was appended since last time.
@@ -333,7 +344,7 @@ class Session {
       path: this.path, id: path.basename(this.path), title: this.title, name: this.name, cwd: this.cwd,
       g: this.g, tokens: this.tokens, afterCompact: this.afterCompact, compactions: this.compactions,
       restores: this.restores, restoredMsg: this.restoredMsg, lastDuration: this.lastDuration,
-      mtime: this.mtime, git: this.git, jobs: this.jobs,
+      mtime: this.mtime, git: this.git, jobs: this.jobs.map((j) => ({ ...j, ...jobOutput(this.path, j.id) })),
       stats: {
         ...st.totals(), tools: st.tools, errors: st.errors, files: st.files.size, prompts: st.prompts,
         lastPrompt: st.lastPrompt, started: st.started, subagents: st.subagents,
@@ -353,7 +364,38 @@ function gitState(cwd) {
   });
 }
 
+const ANSI = /\x1b\[[0-9;?]*[A-Za-z]/g;
+const TAIL_BYTES = 4096;
+
+// A background job's output file (where Claude Code writes it, as the rehydrate hook finds it), its last
+// non-empty line and how long ago it was written.
+function jobOutput(transcript, taskId) {
+  const proj = path.basename(path.dirname(transcript));
+  const root = path.join(os.tmpdir(), "claude", proj);
+  for (const d of listDir(root)) {
+    const out = path.join(root, d.name, "tasks", `${taskId}.output`);
+    let st;
+    try {
+      st = fs.statSync(out);
+    } catch {
+      continue;
+    }
+    let tail = "";
+    try {
+      const fd = fs.openSync(out, "r");
+      const start = Math.max(0, st.size - TAIL_BYTES);
+      const buf = Buffer.alloc(st.size - start);
+      fs.readSync(fd, buf, 0, buf.length, start);
+      fs.closeSync(fd);
+      tail = buf.toString("utf8").replace(ANSI, "");
+    } catch {}
+    const lines = tail.split(/[\r\n]+/).map((l) => l.trim()).filter(Boolean);
+    return { out, last: (lines[lines.length - 1] || "").slice(0, 160), age: Math.max(0, Date.now() / 1000 - st.mtimeMs / 1000) }; // file times can run a hair ahead of the clock
+  }
+  return { out: null, last: "", age: null };
+}
+
 const BG_LAUNCH = /"run_in_background":\s*true/;
 const TASK_ID = /<task-id>([^<]+)<\/task-id>/g;
 
-module.exports = { Session, allTranscripts, openTranscripts, norm, PROJECTS, BASELINE };
+module.exports = { Session, allTranscripts, openTranscripts, jobOutput, norm, PROJECTS, BASELINE };

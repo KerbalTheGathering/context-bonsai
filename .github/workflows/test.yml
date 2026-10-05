@@ -1,0 +1,39 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1" # the tests don't launch the app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - name: Python tests
+        run: |
+          pip install pillow
+          python -m unittest discover tests -v
+      - name: Tree fixture is current
+        run: |
+          python tools/tree_fixture.py
+          git diff --exit-code desktop/test/fixtures/trees.json
+      - name: Plugin and marketplace manifests are valid
+        run: |
+          npm install -g @anthropic-ai/claude-code
+          claude plugin validate --strict plugin
+          claude plugin validate --strict .
+      - name: Desktop app tests
+        working-directory: desktop
+        run: |
+          npm ci
+          npm test

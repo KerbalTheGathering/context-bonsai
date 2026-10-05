@@ -2,7 +2,7 @@
 // meter, status with the Compact button, then context-over-time and grouped stats.
 import { Container, Graphics } from "pixi.js";
 import { CROPS, Diorama } from "./diorama.js";
-import { fmtAgo, fmtDur, fmtK, fmtTok, nowSec, plural } from "./format.js";
+import { fmtAge, fmtAgo, fmtDur, fmtK, fmtTok, nowSec, plural } from "./format.js";
 import { clamp, stageFor, treeFor } from "./tree.js";
 import { styleOf, vgrad } from "./styles.js";
 import { Button, C, DISPLAY, MONO, Runs, ease, fit, label, recolor, tween } from "./ui.js";
@@ -56,7 +56,8 @@ export class FocusView extends Container {
     this.jobs = new Container();
     this.jobsBg = new Graphics();
     this.jobsTxt = label("", 11, 0xffffff);
-    this.jobs.addChild(this.jobsBg, this.jobsTxt);
+    this.jobsSub = label("", 9.5, 0xffffff, { family: MONO });
+    this.jobs.addChild(this.jobsBg, this.jobsTxt, this.jobsSub);
     this.status = new Container();
     this.status.addChild(this.dot, this.stage_, this.advice, this.compact, this.jobs);
 
@@ -225,14 +226,21 @@ export class FocusView extends Container {
     y += 32;
     this.jobs.visible = !!s?.jobs?.length;
     if (this.jobs.visible) { // only while something is running
-      const nj = s.jobs.length, desc = s.jobs[0].desc || "";
+      const nj = s.jobs.length, job = s.jobs[0], desc = job.desc || "";
       recolor(this.jobsTxt, col.warn);
       fit(this.jobsTxt, `◷  ${nj} ${plural(nj, "job")} running` + (desc ? ` · ${desc}` : ""), W - pad * 2 - 20);
       this.jobsTxt.position.set(10, 2);
-      this.jobsBg.clear().roundRect(0, 0, this.jobsTxt.width + 20, 20, 10).fill({ color: col.warn, alpha: 0.08 })
+      // and what it last printed, so a stuck or finished-but-unnoticed job is visible at a glance
+      const detail = job.age == null ? "" : `${fmtAge(job.age)}: ${job.last || "(no output yet)"}`;
+      this.jobsSub.visible = !!detail;
+      recolor(this.jobsSub, col.muted);
+      fit(this.jobsSub, detail, W - pad * 2 - 20);
+      this.jobsSub.position.set(10, 20);
+      const h = detail ? 36 : 20, w = Math.max(this.jobsTxt.width, detail ? this.jobsSub.width : 0) + 20;
+      this.jobsBg.clear().roundRect(0, 0, w, h, 10).fill({ color: col.warn, alpha: 0.08 })
         .stroke({ width: 1, color: col.warn, alpha: 0.7 });
       this.jobs.position.set(pad, 30);
-      y += 28;
+      y += h + 8;
     }
 
     // tokens: context per call over the session, then peak / avg / total
@@ -311,7 +319,9 @@ export class FocusView extends Container {
     this.scene.phase = this.ctrl.phase;
     this.scene.update(ctx);
     const now = performance.now() / 1000;
-    (this.S || styleOf(this.ctrl.focusTheme())).animatePanel(this, now);
+    const S0 = this.S || styleOf(this.ctrl.focusTheme());
+    this.panelMoving = !!S0.animatesPanel && ctx.ambient && (ctx.working || ctx.hovering);
+    if (this.panelMoving) S0.animatePanel(this, now);
 
     if (this.zen) {
       if (this.zenTag.visible) {
@@ -330,8 +340,10 @@ export class FocusView extends Container {
 
     // live dot breathes (a transform, not a redraw)
     const pulse = 0.5 + 0.5 * Math.sin(now * 2.6);
-    this.liveHalo.scale.set((3.5 + pulse * 3) / 6.5);
-    this.liveHalo.alpha = 0.25 * (1 - pulse);
+    if (this.live) { // only a live session breathes, so a quiet card needs no frames
+      this.liveHalo.scale.set((3.5 + pulse * 3) / 6.5);
+      this.liveHalo.alpha = 0.25 * (1 - pulse);
+    }
 
     // the shelf edge doubles as the meter; a shimmer slides along it while compacting
     const W = this.W, k = this.scene.k, shelf = (452 - this.scene.crop[1]) * k, mh = 4;
@@ -343,11 +355,17 @@ export class FocusView extends Container {
       this.mkey = mkey;
       S.meter(this, { W, y: shelf, mh, g, color, col, compacting, now });
     }
-    if (!compacting) this.meterGlow.alpha = (S.glowAlpha ?? 0.18) + 0.12 * pulse;
+    if (!compacting) this.meterGlow.alpha = (S.glowAlpha ?? 0.18) + (this.live ? 0.12 * pulse : 0.06);
 
     // context per call, drawn in over the first second
     const st = s?.stats;
     if (this.spark.visible && st) this.drawSpark(st.series, col, color);
+  }
+
+  // 2 = something moves, 1 = gentle ambience only, 0 = still (see Diorama.motion)
+  get motion() {
+    if (this.zen) return this.scene.motion;
+    return Math.max(this.scene.motion, this.live || this.panelMoving ? 1 : 0);
   }
 
   drawSpark(series, col, color) {

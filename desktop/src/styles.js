@@ -251,6 +251,7 @@ const glass = {
       s.bx = lerp(x0 + 60, x1 - 60, (i + 0.5) / colors.length);
       s.by = y0 + 120 + i * 50;
       s.ph = i * 2.1;
+      s.position.set(s.bx, s.by); // where it rests until it drifts
       s.scale.set(4.2, 2.6);
       d.backFx.addChild(s);
       return s;
@@ -263,6 +264,18 @@ const glass = {
       s.rotation = Math.sin(t * 0.05 + s.ph) * 0.4;
     }
     return true;
+  },
+
+  // a glowing orb with a bright core
+  moon(d, m) {
+    const halo = new Sprite(d.tex.glow);
+    halo.anchor.set(0.5);
+    halo.scale.set(0.75);
+    halo.tint = hex(d.theme.colors.glow);
+    halo.blendMode = d.theme.light ? "normal" : "add";
+    halo.alpha = d.theme.light ? 0.5 : 0.8;
+    m.addChild(halo, new Graphics().circle(0, 0, 11).fill({ color: 0xffffff, alpha: d.theme.light ? 0.95 : 0.9 })
+      .circle(0, 0, 11).stroke({ width: 1, color: d.theme.colors.glow, alpha: 0.9 }));
   },
 
   tally(d, cc) {
@@ -291,6 +304,7 @@ const glass = {
         s.bx = W * (0.2 + 0.3 * i);
         s.by = h * (0.25 + 0.28 * i);
         s.ph = i * 1.9;
+        s.position.set(s.bx, s.by);
         s.scale.set((W / 128) * 1.3, (h / 128) * 0.7);
         fx.addChild(s);
         return s;
@@ -304,6 +318,7 @@ const glass = {
         .stroke({ width: 1, color: 0xffffff, alpha: theme.light ? 0.8 : 0.1 });
     }
   },
+  animatesPanel: true,
   animatePanel(view, t) {
     for (const s of view.blobs || []) {
       s.x = s.bx + Math.sin(t * 0.13 + s.ph) * 40;
@@ -388,7 +403,7 @@ const ink = {
     // a red seal in the corner
     const seal = new Container();
     const stamp = new Graphics().roundRect(0, 0, 30, 30, 3).fill({ color: c.seal || c.crit, alpha: 0.85 });
-    const chars = new Text({ text: "盆\n栽", style: { fontFamily: ink.display, fontSize: 12, fill: c.wall, lineHeight: 13,
+    const chars = new Text({ text: "ç›†\næ ½", style: { fontFamily: ink.display, fontSize: 12, fill: c.wall, lineHeight: 13,
       fontWeight: "700", align: "center" } });
     chars.anchor.set(0.5);
     chars.position.set(15, 15);
@@ -396,6 +411,15 @@ const ink = {
     seal.position.set(x1 - 58, 448 - 44);
     seal.rotation = -0.03;
     d.back.addChild(seal);
+  },
+
+  // the moon left as bare paper inside a faint wash, as sumi-e paints it
+  moon(d, m) {
+    const c = d.theme.colors, g = new Graphics();
+    g.circle(0, 0, 24).fill({ color: c.bark, alpha: 0.07 }).circle(0, 0, 13).fill(c.wall);
+    brush(g, Array.from({ length: 24 }, (_, i) => [Math.cos(-0.6 + i * 0.22) * 13, Math.sin(-0.6 + i * 0.22) * 13]),
+      0.6, 1.4, hex(c.bark), 0.35, 31);
+    m.addChild(g);
   },
 
   tally(d, cc) { // brush ticks on the tray

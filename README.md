@@ -1,65 +1,105 @@
-# Claude Code mods
+# Context Bonsai
 
-Personal mods for Claude Code on Windows: a hook that restores working state after compaction, a terminal status line, and **Context Bonsai**, a desktop widget that draws the active session's context use as a bonsai tree.
+A living bonsai for each of your Claude Code sessions, on Windows. The tree fills out as a session's context grows, its leaves turn and fall near the limit, and compacting prunes it back. It comes as a **Claude Code plugin** (hooks, a status line and commands) plus a **desktop widget**.
 
-None of these make model calls. They read the session logs in `~/.claude/projects` and git on your machine, so they cost no usage.
-
-## What's here
-
-| Folder | What it is | Where it works |
-|---|---|---|
-| `hooks/rehydrate.py` | SessionStart hook (matcher `compact`). After a compaction it adds git state, still-running background jobs and the project's `.claude/brief.md` to Claude's context, and shows a `↻ restored: …` line. | Desktop app and terminal |
-| `statusline/statusline.py` | Status line: bonsai stage emoji, context %, 5-hour and 7-day limits, git branch. | Terminal only (the desktop app runs Claude Code without a terminal display) |
-| `widget/` | Context Bonsai desktop widget, its PreCompact signal hook and icon. | Windows desktop |
-| `bonsai-page/` | Prototype for a `/bonsai` command: writes a one-off HTML snapshot of a session's bonsai. | Any browser |
-| `mockup/` | The original interactive mockup of the bonsai. | Any browser |
-| `tools/make_icon.py` | Rebuilds `widget/bonsai.ico` from the widget's own drawing code. | — |
-
-## Context Bonsai widget
-
-A small always-on-top card for your Claude Code sessions.
-
-**The grove:** when more than one session is open (Claude Code lists open sessions in `~/.claude/sessions`) or has been active in the last 30 minutes, the card shows one small bonsai per session (up to 12), four at a time in a carousel: page with the ‹ › arrows in the header, the dots underneath, or the mouse wheel. Trees are labeled with each session's sidebar title and project. The fullest session is the tallest tree. Click a tree to open its full card; click **‹ N** in the card's header to go back. When any session starts compacting, the card switches to that session so the animation plays on its own tree.
-
-**A session's card:**
-
-- **The tree** fills out as context grows. Leaves go from calm to alarming colors near the limit and start falling above 90%. Compacting prunes it back and adds a tally mark to the pot.
-- **The readout** shows context % and tokens, a "compact soon" mark at 85%, and the stage with a short tip.
-- **The stats** show the git branch, uncommitted files, running background jobs and the compaction count.
-- **Layout:** the session's sidebar title with project · branch · uncommitted files; the tree edge to edge with the % and tokens on the wall and the shelf edge as the meter; one status line with a round ✂ compact button; an amber badge only while a background job runs; a chart of context per call with peak · avg · total tokens; then three icon rows: context (cache hit rate, compactions, API calls), work (tool calls, errors, files edited) and time (session length, time since your last prompt, prompts).
-- **A tree per session:** each session grows its own shape (lean, trunk, spread, mirroring are seeded from its log name), and the tree grows smoothly as context is added.
-- **Zen mode:** just the bonsai, no text (a row of trees when several sessions are active). Hover for a small % tag; compaction animations still play. Double-click or right-click → Zen mode to switch.
-- **Ambient animation** (right-click → Ambient animation to turn off): a breeze rustles the leaves and motes drift while Claude is working; the tree is still while it waits on you, with an occasional leaf letting go; after 30 idle minutes the scene goes to night with a moon and fireflies. The wall's light follows your clock (dawn, day, dusk, night). Costs about 1–2% of total CPU while Claude works, less otherwise.
-- **Compaction:** shears work along the canopy edge, leaves burst off, then a watering can tips in and pours before new buds open.
-- **Themes:** Auto (follows Windows light/dark mode and your accent color), Seasons (changes with the date), Moss, Paper, Sakura, Midnight, Sumi-e, Canyon, Clay, Neon and Pixel. Right-click → *Theme for <project>* gives a project its own theme, so the grove can mix them.
-- **Compact button:** copies `/compact` and brings the Claude app to the front, so you paste it with Ctrl+V and Enter. The widget then animates the compaction: shears snip the canopy while it runs, leaves burst off when it finishes, and rain and new buds play when the rehydrate hook restores state.
-
-Controls: drag to move (the card stays anchored at its bottom-right corner when it changes size). Right-click for Keep on top, Pin this session, Theme, View (Focus or Grove), Zen mode, Rescan sessions (looks for open sessions again and re-reads every transcript's stats), Compact, Preview compact animation, and Quit. Opening the shortcut (or `bonsai_widget.pyw`) again while it runs closes it.
-
-Requirements: Python 3 with Tk and Pillow (`pip install pillow`). It assumes a 1M-token context window; change `window` in `~/.claude/widget/bonsai.json` if yours differs.
-
-## Context Bonsai desktop (Electron + PixiJS)
-
-`desktop/` is a rewrite of the widget's grove and focus views as a GPU-rendered PixiJS app in Electron. The Tk widget stays as is; run one or the other (they share `~/.claude/widget/bonsai.json` for theme, pin and project themes).
-
-- **Living trees:** the same seeded tree per session as the Tk widget, but every leaf is its own sprite moving in a gusty wind while that session works. A cast shadow, a pool of light and light shafts by day; motes while working, fireflies at night. Still trees are baked to a texture so an idle grove costs little.
-- **Grove carousel:** drag or flick it (it carries on with momentum and settles on a tree), scroll the wheel, or use the arrows and page dots. Cards lift on hover; clicking one zooms into its focus card.
-- **Focus card:** the readout, shelf meter, status and Compact button as before, a sparkline that draws itself in, and the same compaction choreography (shears, falling leaves, watering can, buds).
-- **Three art styles**, picked by the theme (right-click → Theme lists them grouped):
-  - *Diorama* (Moss, Paper, Sakura, Midnight, Canyon, Clay, Neon, Pixel): the lit bonsai on a wooden stand with a cast shadow.
-  - *Glass* (Aurora, Frost): frosted panes over a slowly drifting aurora, a glass pot on a lit horizon, foliage as glowing orbs with glowing wood, neon meters.
-  - *Ink* (Sumi-e, Night Ink): washi paper with far mountains in a pale wash, a brush-stroke trunk with ink bleeding into the paper, ink-dab foliage that darkens where it overlaps, a red seal, calmer wind and slower falling leaves.
-- **Themes are data** (`desktop/shared/themes.js`: a palette, leaf color stops and a `style`); styles are sets of hooks in `desktop/src/styles.js` for the backdrop, wood, leaves, panel, dividers and meter. The Tk widget doesn't know the glass and ink themes and shows Moss for them.
-
-Run it from `desktop/` with `npm install` then `npm start` (`npm run dev` opens dev tools), or `.\install.ps1 -Desktop` to build it and point the **Context Bonsai** Start menu shortcut at it (the Tk widget moves to **Context Bonsai (classic)**). Opening the shortcut again closes it. Dev aids: `BONSAI_SHOTS=<dir> npx electron .` walks the views and the compaction preview and saves a screenshot at each step; add `BONSAI_THEME=<name>` to preview a theme without saving it.
+None of it makes model calls. It reads the session logs in `~/.claude/projects` and git on your machine, so it costs no usage.
 
 ## Install
 
+Clone the repo, then either ask Claude Code, in the clone, to "install Context Bonsai from this repo", or run it yourself:
+
 ```powershell
-.\install.ps1
+.\scripts\install.ps1          # shows the plan, asks before changing anything
+.\scripts\install.ps1 -Plan    # just show the plan
+.\scripts\install.ps1 -Uninstall
 ```
 
-This copies the files into `~/.claude` and creates the **Context Bonsai** Start menu shortcut. It does not edit your settings. Merge `settings.example.json` into `~/.claude/settings.json` yourself, replacing `YOU` with your Windows user name. The hooks take effect in sessions started after the change.
+It needs Python 3 with Pillow (`pip install pillow`), Node.js, and the `claude` CLI on your PATH. What it does:
+
+1. **Installs the plugin.** It adds the clone as a local plugin marketplace and installs the `context-bonsai` plugin for your user. The plugin provides the two hooks below and the commands. Running the script again updates the plugin from the clone; restart Claude Code to load an update.
+2. **Updates `~/.claude/settings.json`,** after backing it up and only with your OK:
+   - It removes old hand-installed entries for these hooks, which would otherwise fire twice.
+   - It points the status line at the clone. Plugins can't provide a status line, and if you already use a status line of your own, it's left alone.
+3. **Builds the desktop app** and installs a standalone copy in `%LOCALAPPDATA%\Programs\ContextBonsai`, so the widget keeps working if the clone moves. It's Electron's runtime (about 300 MB) plus the app.
+4. **Creates Start menu shortcuts:** **Context Bonsai** (the desktop app) and **Context Bonsai (classic)** (the Tk widget). It also records the clone's location in `~/.claude/widget/install.json` for the commands.
+
+Hooks take effect in sessions started afterwards.
+
+## The plugin (`plugin/`)
+
+| Part | What it does |
+|---|---|
+| SessionStart hook (`compact`) | After a compaction, adds git state, still-running background jobs and the project's `.claude/brief.md` to Claude's context, and shows a `↻ restored: …` line. |
+| PreCompact hook | Tells the widgets a compaction has started, so they animate it on that session's tree. |
+| Status line (`plugin/statusline/`) | Bonsai stage emoji, context %, 5-hour and 7-day limits, git branch. Terminal only; the desktop app has no status line display. |
+| `/context-bonsai:widget` | Opens the desktop widget, or closes it if it's open (`classic` for the Tk widget). |
+| `/context-bonsai:snapshot` | Writes a one-off HTML page of this session's bonsai and opens it. |
+| `/context-bonsai:setup` | Runs the installer from your clone: shows the plan, asks, applies. `uninstall` reverses it. |
+
+## The desktop widget (`desktop/`)
+
+An always-on-top card, rendered on the GPU with PixiJS in Electron.
+
+**The grove** shows a tree for every session that's open (from `~/.claude/sessions`) or was active in the last 30 minutes, up to 12. You see four at a time in a carousel:
+- **Browsing:** drag or flick it (it carries on with momentum), scroll the wheel, or use the arrows, the page dots or ←/→.
+- **Labels:** each card shows the session's sidebar title and project.
+- **Order:** right-click → Grove order sorts by first seen, fullest, or most recent.
+- **Opening:** click a tree (or press Enter) to zoom into its card; **‹ N** or Esc goes back.
+- **Compaction:** when any session starts compacting, the card switches to it so the animation plays on its own tree.
+
+**A session's card:**
+
+- **The tree** grows its own shape per session, seeded from its log name. Every leaf moves in a gusty wind while Claude works. While it waits on you, the tree is still, with an occasional leaf letting go.
+- **The readout and meter** show context % and tokens on the wall, with the shelf edge as the meter (a mark at 85% means compact soon). The status line below shows the stage and a short tip, plus a **Compact** button that copies `/compact` and brings the Claude app forward.
+- **Background jobs** get an amber chip while they run, showing each job's latest output line and its age.
+- **Stats:**
+  - a sparkline of context per call, with peak, average and total tokens;
+  - context: cache hit rate, compactions, API calls;
+  - work: tool calls, errors, files edited;
+  - time: session length, time since your last prompt, prompts.
+- **Compaction:** shears work along the canopy, leaves fall into a pile, then a watering can pours and new buds open.
+- **Time of day:** the wall's light follows your clock, and at night (or after 30 idle minutes) a moon rises and fireflies come out.
+
+**Three art styles,** chosen by theme:
+
+- *Diorama* (Moss, Paper, Sakura, Midnight, Canyon, Clay, Neon, Pixel): a lit bonsai on a wooden stand, with a cast shadow.
+- *Glass* (Aurora, Frost): frosted panes over a drifting aurora, a glass pot on a lit horizon, glowing foliage, neon meters.
+- *Ink* (Sumi-e, Night Ink): washi paper with mountains in a pale wash, a brush-stroke trunk with ink bleeding into the paper, ink-dab foliage, a red seal.
+
+Plus Auto (follows Windows light/dark mode and accent color) and Seasons (changes with the date). Right-click → *Theme for <project>* gives one project its own theme.
+
+**Controls:**
+- Drag to move. The card stays anchored at its bottom-right corner, and is always kept on a screen.
+- Double-click or Z toggles zen mode (just the trees).
+- Right-click for Start with Windows, Keep on top, Pin this session, Theme, View, Grove order, Zen mode, Ambient animation, Rescan sessions, Compact, Preview compact animation, and Quit.
+- Opening the shortcut again closes it.
+
+**CPU:** it draws only when something changes. Idle, it measured 0.5–3% of one CPU core.
+
+It assumes a 1M-token context window; change `window` in `~/.claude/widget/bonsai.json` if yours differs. Settings there are shared with the classic widget.
+
+**The classic widget** (`widget/bonsai_widget.pyw`) is the original Tk version, with the same data and settings and the diorama themes. It's kept as **Context Bonsai (classic)**.
+
+## Repository layout
+
+| Path | What it is |
+|---|---|
+| `.claude-plugin/marketplace.json` | Makes the clone a plugin marketplace listing `plugin/`. |
+| `plugin/` | The Claude Code plugin: manifest, hooks, status line, commands. |
+| `desktop/` | The Electron + PixiJS widget. |
+| `widget/` | The classic Tk widget and the shared icon. |
+| `scripts/` | The installer, the settings migration it uses, and the app packager. |
+| `bonsai-page/` | The HTML snapshot page behind `/context-bonsai:snapshot`. |
+| `tests/`, `desktop/test/` | Python and Node test suites, run by CI. |
+| `tools/` | Dev helpers: the tree parity fixture and the icon builder. |
+| `mockup/` | The original interactive mockup. |
+
+## Development
+
+- **Tests:** `python -m unittest discover tests`, and `npm test` in `desktop/`.
+- **Running the app:** `npm start` in `desktop/` (`npm run dev` opens dev tools).
+- **Plugin edits:** bump `version` in `plugin/.claude-plugin/plugin.json` and the marketplace entry, then rerun the installer to update the installed copy (Claude Code runs plugins from its own cached copy, not from the clone). `claude plugin validate --strict plugin` checks the manifest.
+- **Dev aids** (environment variables, documented in `desktop/main/dev.js`): `BONSAI_SHOTS` (screenshot walk-through), `BONSAI_THEME` / `BONSAI_CFG` (unsaved setting overrides), `BONSAI_HOUR` (pin the clock), `BONSAI_LEAK`, `BONSAI_DPI`, `BONSAI_KEYS` (self-checks), and `desktop/tools/measure-cpu.ps1`.
 
 ## Conventions
 

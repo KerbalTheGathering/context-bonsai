@@ -1,7 +1,7 @@
 // Context Bonsai renderer: owns the view (focus card or grove), the compaction choreography and the
 // ambience, and keeps the window sized to the card. Data arrives from the main process every ~2s.
 import "pixi.js/unsafe-eval";
-import { Application } from "pixi.js";
+import { Application, UPDATE_PRIORITY } from "pixi.js";
 import { resolveTheme } from "../shared/themes.js";
 import { FocusView } from "./focus.js";
 import { GroveView } from "./grove.js";
@@ -54,7 +54,19 @@ class Controller {
     api.onState(guard((s) => this.onState(s)));
     api.onCommand(guard((c) => this.onCommand(c)));
     api.ready();
+    // draw only when something changed: replace Pixi's every-frame render with one that checks
+    this.needsRender = true;
+    this.renderedAt = 0;
+    this.app.ticker.remove(this.app.render, this.app);
     this.app.ticker.add((t) => this.tick(t.deltaMS));
+    this.app.ticker.add(() => {
+      if (!this.needsRender) return;
+      this.needsRender = false;
+      this.renderedAt = performance.now();
+      this.app.render();
+    }, null, UPDATE_PRIORITY.LOW);
+    api.onPause?.((paused) => (paused ? this.app.ticker.stop() : (this.invalidate(), this.app.ticker.start())));
+    this.watchResolution();
     setInterval(() => this.step(), 500);
   }
 
@@ -62,8 +74,8 @@ class Controller {
   onState(st) {
     this.cfg = st.cfg;
     this.system = st.system;
-    this.order = st.order;
     this.sessions = new Map(st.sessions.map((s) => [s.path, s]));
+    this.order = this.sorted(st.order);
     this.newest = st.newest;
     const pinned = this.cfg.pinned && this.sessions.has(this.cfg.pinned) ? this.cfg.pinned : null;
     if (this.phase === "idle" && (this.follow || !this.focusPath)) {
@@ -102,6 +114,7 @@ class Controller {
   }
 
   onCommand({ cmd, value }) {
+    this.invalidate();
     if (cmd === "view") value === "grove" ? this.showGrove() : this.showFocus();
     else if (cmd === "compact") this.onCompact();
     else if (cmd === "preview") this.runPreview();
@@ -110,6 +123,13 @@ class Controller {
         until: Date.now() / 1000 + 6 };
       this.relayout();
     }
+  }
+
+  // The grove's order: as trees first appeared (the default), fullest first, or most recently active first.
+  sorted(order) {
+    const by = { fullest: (s) => -s.g, recent: (s) => -s.mtime }[this.cfg.grove_sort];
+    if (!by) return order;
+    return [...order].sort((a, b) => by(this.sessions.get(a) || {}) - by(this.sessions.get(b) || {}) || order.indexOf(a) - order.indexOf(b));
   }
 
   focusSession() {
@@ -150,7 +170,29 @@ class Controller {
     view.enter?.();
   }
 
-  relayout() {
+  invalidate() {
+    this.needsRender = true;
+  }
+
+  // Moved to a monitor with different scaling: render at its resolution and re-bake what was baked.
+  watchResolution() {
+    const dpr = window.devicePixelRatio || 1;
+    matchMedia(`(resolution: ${dpr}dppx)`).addEventListener("change", () => {
+      this.onResolution();
+      this.watchResolution();
+    }, { once: true });
+  }
+
+  onResolution() {
+    const r = window.devicePixelRatio || 1;
+    this.app.renderer.resize(this.size?.w || 300, this.size?.h || 420, r);
+    for (const scene of [this.focus.scene, ...[...this.grove.cards.values()].map((c) => c.scene)]) scene.resize(scene.w);
+    this.focus.panelKey = this.grove.panelKey = null;
+    this.relayout();
+  }
+
+  relayout(invalidate = true) {
+    if (invalidate) this.invalidate();
     const { w, h } = this.current.layout();
     const panel = (this.current === this.grove ? this.widgetTheme() : this.focusTheme()).colors.panel;
     if (panel !== this.panelColor) { // what shows for a moment while the window resizes
@@ -260,7 +302,7 @@ class Controller {
     if (this.phase === "idle" && !this.gTween && !this.preview && s && Math.abs(s.g - this.g) > 0.002) {
       this.gTween = { from: this.g, to: s.g, t0: performance.now(), dur: 1200 }; // grow smoothly to the new size
     }
-    this.relayout();
+    this.relayout(false); // text that ticks over (timers, "idle 3m") shows on the next safety redraw
   }
 
   // --- ambience ---
@@ -277,7 +319,7 @@ class Controller {
   // The clock's tint over the scene: dawn, day, dusk, night; deeper when the session sleeps.
   sky() {
     if (this.sleeping()) return { color: 0x0a0e24, alpha: 0.4 };
-    const d = new Date(), h = d.getHours() + d.getMinutes() / 60;
+    const h = this.hour();
     if (h >= 5 && h < 8) return { color: 0xffa06e, alpha: 0.12 * (1 - Math.abs(h - 6.5) / 1.5) };
     if (h >= 8 && h < 17) return { color: 0xffffff, alpha: 0 };
     if (h >= 17 && h < 19) return { color: 0xff8246, alpha: (0.1 * (h - 17)) / 2 };
@@ -288,8 +330,15 @@ class Controller {
     return { color: 0x192350, alpha: 0.22 };
   }
 
+  // the local hour, as a fraction (dev aid: BONSAI_HOUR pins it)
+  hour() {
+    if (window.__hour != null) return window.__hour;
+    const d = new Date();
+    return d.getHours() + d.getMinutes() / 60;
+  }
+
   night() {
-    const h = new Date().getHours();
+    const h = this.hour();
     return this.sleeping() || h >= 21 || h < 5;
   }
 
@@ -299,15 +348,15 @@ class Controller {
       || (this.current === this.grove && (this.grove.drag || Math.abs(this.grove.vel) > 0.001
         || Math.abs(this.grove.target - this.grove.scroll) > 0.001))
       || (this.current === this.focus && this.focus.scene.particles.length > 0);
-    const swaying = this.current === this.grove
-      ? [...this.grove.cards.values()].some((c) => c.visible && c.scene.moving)
-      : this.focus.scene.moving;
-    this.app.ticker.maxFPS = window.__fpsCap ?? (lively || this.hovering ? 0 : swaying ? 30 : 8);
+    const motion = (this.current === this.grove ? this.grove : this.focus).motion;
+    // 60 fps for things you're doing, 30 for sway and compaction, 15 for ambience, and when nothing moves
+    // just 4 ticks a second to notice changes, drawing only when something did (or once a second)
+    this.app.ticker.maxFPS = window.__fpsCap ?? (lively ? 0 : motion >= 2 ? 30 : motion === 1 ? 15 : 4);
+    if (lively || motion > 0 || performance.now() - this.renderedAt > 1000) this.invalidate();
     if (window.__probe && performance.now() - (this.probeAt || 0) > 2000) {
       this.probeAt = performance.now();
-      console.log(`fps ${this.app.ticker.FPS.toFixed(0)} max ${this.app.ticker.maxFPS} lively ${!!lively} hover ${this.hovering} `
-        + `swaying ${swaying} view ${this.view} drag ${!!this.grove.drag} vel ${this.grove.vel.toFixed(4)} `
-        + `scroll ${this.grove.scroll.toFixed(3)}/${this.grove.target}`);
+      console.log(`fps ${this.app.ticker.FPS.toFixed(0)} max ${this.app.ticker.maxFPS} lively ${!!lively} motion ${motion} `
+        + `view ${this.view} hover ${this.hovering}`);
     }
     if (this.gTween) {
       const { from, to, t0, dur } = this.gTween;
@@ -319,10 +368,31 @@ class Controller {
       }
     }
     const ambient = this.cfg.ambient !== false;
-    const ctx = { dt, ambient, working: this.working(), sleeping: this.sleeping(), night: this.night(), sky: this.sky() };
+    const ctx = { dt, ambient, working: this.working(), sleeping: this.sleeping(), night: this.night(), sky: this.sky(),
+      hovering: this.hovering };
     if (this.current === this.grove) {
-      this.grove.update({ dt, ambient, working: false, sleeping: false, night: ctx.night, sky: ctx.sky });
+      this.grove.update({ ...ctx, working: false, sleeping: false });
     } else this.focus.update(ctx);
+  }
+
+  // Keyboard (once the widget has been clicked): arrows page the grove or step through sessions,
+  // Enter opens the tree under the pointer (or the first in view), Esc goes back to the grove, Z is zen.
+  onKey(e) {
+    const step = { ArrowRight: 1, ArrowLeft: -1 }[e.key];
+    if (step && this.view === "grove") this.grove.page(step);
+    else if (step && this.order.length > 1) {
+      const i = this.order.indexOf(this.focusPath);
+      this.follow = false;
+      this.setFocus(this.order[(i + step + this.order.length) % this.order.length]);
+      this.focus.enter();
+    } else if (e.key === "Enter" && this.view === "grove") {
+      const path = this.grove.hover || this.order[Math.round(this.grove.target)];
+      if (path) this.openFocus(path, this.grove.cards.get(path));
+    } else if (e.key === "Escape" && this.view === "focus") this.showGrove();
+    else if (e.key.toLowerCase() === "z" && !e.ctrlKey && !e.altKey) api.toggleZen();
+    else return;
+    e.preventDefault();
+    this.relayout();
   }
 
   // --- input: drag the window from anywhere that isn't a control; right-click for the menu ---
@@ -352,9 +422,10 @@ class Controller {
       e.preventDefault();
       const s = this.focusSession();
       api.menu({ view: this.view, count: this.order.length, phase: this.phase, focusPath: this.focusPath,
-        focusName: s?.cwd ? s.name : null });
+        focusName: s?.cwd ? s.name : null, groveSort: this.cfg.grove_sort || "seen" });
     });
     window.addEventListener("dblclick", () => api.toggleZen());
+    window.addEventListener("keydown", (e) => this.onKey(e));
     document.addEventListener("mouseenter", () => { this.hovering = true; this.relayout(); });
     document.addEventListener("mouseleave", () => { this.hovering = false; this.grove.hover = null; this.relayout(); });
   }
@@ -362,5 +433,35 @@ class Controller {
 
 window.addEventListener("unhandledrejection", (e) => console.error(e.reason?.stack || e.reason));
 window.addEventListener("error", (e) => console.error(e.error?.stack || e.message));
+// Dev aid: create and destroy n scenes, and report GPU textures before and after (should match).
+window.__leakTest = async (n = 40) => {
+  const { Diorama, CROPS } = await import("./diorama.js");
+  const { treeFor } = await import("./tree.js");
+  const c = window.__bonsai, r = c.app.renderer;
+  const frames = (k) => new Promise((res) => { let i = 0; const f = () => (++i >= k ? res() : requestAnimationFrame(f)); f(); });
+  const count = () => r.texture.managedTextures.filter(Boolean).length; // removed entries leave null slots
+  await frames(10);
+  const before = count();
+  const beforeSet = new Set(r.texture.managedTextures);
+  for (let i = 0; i < n; i++) {
+    const d = new Diorama(c.app, { width: 124, crop: CROPS.grove, theme: c.widgetTheme(), tree: treeFor(`leak${i}.jsonl`) });
+    d.g = 0.5;
+    c.app.stage.addChild(d);
+    for (let k = 0; k < 3; k++) {
+      d.update({ dt: 200, ambient: false, working: false, sleeping: false, night: false, sky: null });
+      await frames(1);
+    }
+    d.destroy({ children: true });
+    await frames(3);
+  }
+  await frames(10);
+  const after = r.texture.managedTextures.filter((t) => !beforeSet.has(t));
+  const kinds = {};
+  for (const t of after) {
+    const k = `${t.constructor.name}:${t.label || ""}:${t.resource?.constructor?.name || "-"}:${Math.round(t.width)}x${Math.round(t.height)}`;
+    kinds[k] = (kinds[k] || 0) + 1;
+  }
+  return { before, after: count(), n, kinds };
+};
 window.__bonsai = new Controller();
 window.__bonsai.init();

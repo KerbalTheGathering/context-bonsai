@@ -1,12 +1,15 @@
 // Context Bonsai (desktop): Electron main process. Polls Claude Code transcripts, tracks which sessions
 // are open, notices compactions and restores, and feeds a PixiJS renderer in a frameless, transparent
 // window. Launching it again while it runs closes it, like the Tk widget.
-const { app, BrowserWindow, Menu, clipboard, ipcMain, nativeTheme, screen, systemPreferences } = require("electron");
+const { app, BrowserWindow, Menu, clipboard, ipcMain, nativeTheme, powerMonitor, screen, systemPreferences } = require("electron");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { execFile } = require("child_process");
 const { Session, allTranscripts, openTranscripts, norm } = require("./data");
+const { fitInside } = require("./place");
+const { readFile, saveKeys } = require("./config");
+const { setupDev } = require("./dev");
 const { THEMES, THEME_NAMES } = require("../shared/themes");
 const STYLE_LABELS = { diorama: "Diorama", glass: "Glass", ink: "Ink" };
 
@@ -23,7 +26,8 @@ function themeItems(checked, pick, labelFor = (n) => n) {
   return items;
 }
 
-const WIDGET_DIR = path.join(os.homedir(), ".claude", "widget"); // shared with the Tk widget and the PreCompact hook
+// shared with the Tk widget and the plugin's PreCompact hook (BONSAI_DATA_DIR overrides it, as there)
+const WIDGET_DIR = process.env.BONSAI_DATA_DIR || path.join(os.homedir(), ".claude", "widget");
 const CONFIG = path.join(WIDGET_DIR, "bonsai.json");
 const SIGNAL = path.join(WIDGET_DIR, "signal.json");
 const DEFAULTS = { window: 1_000_000, topmost: true, pinned: null, theme: "Moss", ambient: true, zen: false,
@@ -33,13 +37,18 @@ const GROVE_MAX = 12;
 const LIVE_SECONDS = 15; // how often to re-read the open-session registry
 const POLL_MS = 2000;
 const DEV = process.argv.includes("--dev");
+// packaged, the icon sits next to the app; run from the clone, it's the widget's
+const ICON = [path.join(__dirname, "..", "bonsai.ico"), path.join(__dirname, "..", "..", "widget", "bonsai.ico")]
+  .find((p) => fs.existsSync(p));
+
+// Start with Windows. Run from the clone (electron.exe <app dir>), the login item needs the app dir too.
+function loginItem() {
+  return { path: process.execPath, args: process.defaultApp ? [path.resolve(process.argv[1] || ".")] : [] };
+}
 
 let win = null;
 let cfg = loadConfig();
-if (process.env.BONSAI_THEME) { // dev aid: preview a theme everywhere without saving it
-  cfg.theme = process.env.BONSAI_THEME;
-  cfg.project_themes = {};
-}
+let configSeen = mtime(CONFIG);
 const sessions = new Map(); // transcript path -> Session
 let order = []; // grove order, oldest tree first so trees don't jump around
 let focusPath = null; // the renderer's focused session: gets git status and stays in the list
@@ -48,19 +57,36 @@ let newest = null;
 let signalSeen = mtime(SIGNAL);
 let drag = null;
 
+
 function loadConfig() {
-  try {
-    return { ...DEFAULTS, ...JSON.parse(fs.readFileSync(CONFIG, "utf8")) };
-  } catch {
-    return { ...DEFAULTS };
+  const c = { ...DEFAULTS, ...readFile(CONFIG) };
+  if (process.env.BONSAI_THEME) { // dev aid: preview a theme everywhere without saving it
+    c.theme = process.env.BONSAI_THEME;
+    c.project_themes = {};
   }
+  if (process.env.BONSAI_CFG) Object.assign(c, JSON.parse(process.env.BONSAI_CFG)); // dev aid: unsaved overrides
+  return c;
 }
 
-function saveConfig() {
+// Write just these keys, keeping whatever else is in the file: the Tk widget shares it, so writing our
+// whole (possibly stale) copy would undo its changes.
+function saveConfig(...keys) {
   try {
-    fs.mkdirSync(WIDGET_DIR, { recursive: true });
-    fs.writeFileSync(CONFIG, JSON.stringify(cfg, null, 2));
+    saveKeys(CONFIG, cfg, keys);
+    configSeen = mtime(CONFIG);
   } catch {}
+}
+
+// Pick up settings another app (the Tk widget) changed in the shared file.
+function reloadConfig() {
+  const m = mtime(CONFIG);
+  if (m === configSeen) return false;
+  configSeen = m;
+  const next = loadConfig();
+  if (JSON.stringify(next) === JSON.stringify(cfg)) return false;
+  cfg = next;
+  win?.setAlwaysOnTop(!!cfg.topmost);
+  return true;
 }
 
 function mtime(p) {
@@ -93,6 +119,7 @@ function activePaths() {
 }
 
 function refresh() {
+  reloadConfig();
   const events = [];
   let paths = activePaths();
   const pinned = cfg.pinned && fs.existsSync(cfg.pinned) ? cfg.pinned : null;
@@ -170,24 +197,29 @@ function anchor() {
   return [wa.x + wa.width - 24, wa.y + wa.height - 24];
 }
 
+// Where a w x h card goes: bottom-right corner at the anchor, but always wholly inside the work area of
+// the display nearest to it, so a removed or rearranged monitor can't strand it off-screen.
+function placement(w, h) {
+  return fitInside(anchor(), w, h, screen.getAllDisplays().map((d) => d.workArea));
+}
+
+function replace() {
+  if (!win || drag) return;
+  const [w, h] = win.getSize();
+  win.setBounds(placement(w, h));
+}
+
 function createWindow() {
   win = new BrowserWindow({
     // Opaque with Windows 11's own rounded corners and shadow: a transparent window would be composited on the
     // CPU every frame.
     width: 300, height: 420, show: false, frame: false, transparent: false, roundedCorners: true, hasShadow: true,
     resizable: false, maximizable: false, fullscreenable: false, skipTaskbar: true, alwaysOnTop: !!cfg.topmost,
-    title: "Context Bonsai", backgroundColor: "#1A201F", icon: path.join(__dirname, "..", "..", "widget", "bonsai.ico"),
+    title: "Context Bonsai", backgroundColor: "#1A201F", icon: ICON,
     webPreferences: { preload: path.join(__dirname, "preload.js"), contextIsolation: true, nodeIntegration: false },
   });
   win.loadFile(path.join(__dirname, "..", "index.html"));
   if (DEV) win.webContents.openDevTools({ mode: "detach" });
-  const logDir = process.env.BONSAI_SHOTS || process.env.BONSAI_PROBE;
-  if (logDir) {
-    const log = path.join(logDir, "console.log");
-    fs.writeFileSync(log, "");
-    win.webContents.on("console-message", (e) => fs.appendFileSync(log, `[${e.level}] ${e.message}\n`));
-    win.webContents.on("did-finish-load", () => win.webContents.executeJavaScript("window.__probe = 1"));
-  }
   win.on("closed", () => app.quit());
 }
 
@@ -196,10 +228,7 @@ ipcMain.on("ready", () => refresh());
 // The card keeps its bottom-right corner fixed, so switching views grows it up and to the left.
 ipcMain.on("resize", (_, w, h) => {
   if (!win || drag) return;
-  const [r, b] = anchor();
-  w = Math.ceil(w);
-  h = Math.ceil(h);
-  win.setBounds({ x: Math.round(r - w), y: Math.round(b - h), width: w, height: h });
+  win.setBounds(placement(Math.ceil(w), Math.ceil(h)));
   if (!win.isVisible()) win.showInactive();
 });
 
@@ -222,7 +251,8 @@ ipcMain.on("drag-end", () => {
   const [x, y] = win.getPosition();
   const [w, h] = win.getSize();
   cfg.desktop = { right: x + w, bottom: y + h };
-  saveConfig();
+  saveConfig("desktop");
+  replace(); // dropped partly off-screen: pull it back in
 });
 
 ipcMain.on("background", (_, color) => win?.setBackgroundColor(color));
@@ -249,10 +279,12 @@ ipcMain.handle("compact", () => {
 const command = (cmd, value) => win?.webContents.send("command", { cmd, value });
 
 ipcMain.on("menu", (_, info) => {
-  const set = (k, v) => { cfg[k] = v; saveConfig(); push(); };
+  const set = (k, v) => { cfg[k] = v; saveConfig(k); push(); };
   const themeLabel = (n) => ({ Auto: "Auto (follows Windows)", Seasons: "Seasons (changes with the date)" })[n] || n;
   const themes = themeItems((n) => cfg.theme === n, (n) => set("theme", n), themeLabel);
   const template = [
+    { label: "Start with Windows", type: "checkbox", checked: app.getLoginItemSettings(loginItem()).openAtLogin,
+      click: (m) => app.setLoginItemSettings({ ...loginItem(), openAtLogin: m.checked }) },
     { label: "Keep on top", type: "checkbox", checked: !!cfg.topmost,
       click: (m) => { set("topmost", m.checked); win.setAlwaysOnTop(m.checked); } },
     { label: "Pin this session", type: "checkbox", checked: !!info.focusPath && cfg.pinned === info.focusPath,
@@ -279,6 +311,9 @@ ipcMain.on("menu", (_, info) => {
       { label: info.count > 1 ? "Grove (every active session)" : "Grove (only one session active)", type: "radio",
         checked: info.view === "grove", enabled: info.count > 1, click: () => command("view", "grove") },
     ] },
+    { label: "Grove order", enabled: info.count > 1, submenu: [
+      ["seen", "As sessions appear"], ["fullest", "Fullest first"], ["recent", "Most recent first"],
+    ].map(([v, label]) => ({ label, type: "radio", checked: (cfg.grove_sort || "seen") === v, click: () => set("grove_sort", v) })) },
     { label: "Zen mode", type: "checkbox", checked: !!cfg.zen, click: (m) => set("zen", m.checked) },
     { label: "Ambient animation", type: "checkbox", checked: cfg.ambient !== false, click: (m) => set("ambient", m.checked) },
     { label: "Rescan sessions", click: () => { rescan(); command("rescanned", order.length); } },
@@ -294,52 +329,9 @@ ipcMain.on("menu", (_, info) => {
 
 ipcMain.on("toggle-zen", () => {
   cfg.zen = !cfg.zen;
-  saveConfig();
+  saveConfig("zen");
   push();
 });
-
-// Dev aid: BONSAI_SHOTS=<dir> walks the views and the compaction preview, saving a PNG at each step.
-function shots(dir) {
-  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-  const snap = async (name) => {
-    const img = await win.webContents.capturePage();
-    fs.writeFileSync(path.join(dir, name + ".png"), img.toPNG());
-  };
-  (async () => {
-    await wait(5000);
-    await snap("1-start");
-    command("view", "grove");
-    await wait(1500);
-    await snap("2-grove");
-    win.webContents.executeJavaScript("window.__bonsai?.grove.page(1)");
-    await wait(250);
-    await snap("3-grove-sliding");
-    await wait(1200);
-    await snap("4-grove-page2");
-    command("view", "focus");
-    await wait(1800);
-    await snap("5-focus");
-    command("preview");
-    await wait(3000);
-    await snap("6-compacting");
-    await wait(2300);
-    await snap("7-pruned");
-    await wait(2600);
-    await snap("8-watering");
-    await wait(4000);
-    await snap("9-restored");
-    cfg.zen = true;
-    push();
-    await wait(1200);
-    await snap("10-zen-focus");
-    command("view", "grove");
-    await wait(1500);
-    await snap("11-zen-grove");
-    cfg.zen = false;
-    push();
-    app.quit();
-  })().catch((e) => { fs.writeFileSync(path.join(dir, "error.txt"), String(e.stack || e)); app.quit(); });
-}
 
 if (!app.requestSingleInstanceLock()) {
   app.quit(); // already running: launching again toggles it off
@@ -347,12 +339,13 @@ if (!app.requestSingleInstanceLock()) {
   app.on("second-instance", () => app.quit());
   app.whenReady().then(() => {
     createWindow();
-    if (process.env.BONSAI_SHOTS) shots(process.env.BONSAI_SHOTS);
-    if (process.env.BONSAI_FPS) { // dev aid: pin the frame rate to measure what it costs
-      win.webContents.on("did-finish-load", () => win.webContents.executeJavaScript(`window.__fpsCap = ${+process.env.BONSAI_FPS}`));
-    }
+    setupDev(app, win, { command, setZen: (on) => { cfg.zen = on; push(); }, setCfg: (k, v) => { cfg[k] = v; push(); }, loginItem });
     setInterval(refresh, POLL_MS);
     nativeTheme.on("updated", () => push());
+    for (const e of ["display-added", "display-removed", "display-metrics-changed"]) screen.on(e, replace);
+    // nothing to see on a locked screen: stop drawing until it unlocks
+    powerMonitor.on("lock-screen", () => win?.webContents.send("pause", true));
+    powerMonitor.on("unlock-screen", () => win?.webContents.send("pause", false));
     systemPreferences.on?.("accent-color-changed", () => push());
   });
   app.on("window-all-closed", () => app.quit());

@@ -2,8 +2,8 @@
 // is. Leaves are sprites that move in a gusty wind; branches and trunk are vector meshes rebuilt only when
 // the tree grows. Everything is drawn in the mockup's 600x480 scene units. The theme's style (src/styles.js)
 // decides how each part looks; with no hook, the diorama look below is used.
-import { BlurFilter, Container, FillGradient, Filter, Graphics, Rectangle, Sprite, Texture, defaultFilterVert } from "pixi.js";
-import { styleOf } from "./styles.js";
+import { BlurFilter, ColorMatrixFilter, Container, FillGradient, Filter, Graphics, Rectangle, Sprite, Texture, defaultFilterVert } from "pixi.js";
+import { styleOf, vgrad } from "./styles.js";
 import { textures } from "./textures.js";
 import {
   BASELINE, TAU, clamp, hex, lerp, leafColor, leavesAt, lushness, makePile, mix, shootPoint,
@@ -17,6 +17,20 @@ export const CROPS = {
 
 const shadeHex = (c, f) => (f >= 1 ? mix(hex(c), 0xffffff, f - 1) : mix(0x000000, hex(c), f));
 const val = (v, d) => (typeof v === "function" ? v(d) : v);
+// The pot's sideways light: cached per palette, since a FillGradient owns a texture.
+const potGrads = new Map();
+function potGradient(c) {
+  const key = `${c.potHi}|${c.pot}|${c.potDark}`;
+  if (!potGrads.has(key)) {
+    potGrads.set(key, new FillGradient({
+      type: "linear", start: { x: 0, y: 0 }, end: { x: 1, y: 0 },
+      colorStops: [{ offset: 0, color: c.potHi }, { offset: 0.3, color: c.pot }, { offset: 1, color: c.potDark }],
+    }));
+  }
+  return potGrads.get(key);
+}
+// Free GPU resources a frame later, once the frame that drew them no longer has them bound.
+const retire = (fn) => requestAnimationFrame(() => requestAnimationFrame(fn));
 
 // Pixel theme: snap the scene to a coarse grid, like the Tk widget's low-res-and-scale-up look.
 function pixelateFilter(size) {
@@ -65,7 +79,11 @@ export class Diorama extends Container {
     this.skyTint = { color: 0xffffff, alpha: 0 };
 
     this.world = new Container();
-    this.back = new Container();
+    this.back = new Container(); // built off stage, then baked into backSprite
+    this.backSprite = new Sprite();
+    this.still = false;
+    this.stillSprite = new Sprite(); // a still tree, baked, shown in place of the live sprites
+    this.stillSprite.visible = false;
     this.backFx = new Container(); // live backdrop effects a style may add (an aurora)
     this.tally = new Graphics();
     this.pileLayer = new Container();
@@ -83,14 +101,17 @@ export class Diorama extends Container {
     this.glow = new Container();
     this.glow.blendMode = "add";
     this.sky = new Graphics();
+    this.moon = new Container(); // at night, in the top right corner; each style draws its own
+    this.moon.alpha = 0;
     this.tools = new Container();
 
     this.treeRoot.position.set(300, 398);
     this.treeRoot.pivot.set(300, 398);
     this.treeInner.addChild(this.woodEcho, this.branches, this.trunk, this.domes, this.leafLayer);
     this.treeRoot.addChild(this.treeInner);
-    this.world.addChild(this.back, this.backFx, this.tally, this.pileLayer, this.shadow, this.treeRoot, this.fx, this.glow,
-      this.sky, this.tools);
+    this.world.addChild(this.backSprite, this.backFx, this.tally, this.pileLayer, this.shadow, this.treeRoot, this.stillSprite,
+      this.fx, this.glow,
+      this.sky, this.moon, this.tools);
     this.addChild(this.world);
     this.clip = new Graphics();
     this.addChild(this.clip);
@@ -112,6 +133,8 @@ export class Diorama extends Container {
     this.clip.clear().rect(0, 0, this.w, this.h).fill(0xffffff);
     this.buildBack();
     this.builtKey = null;
+    this.stillValid = false;
+    this.shadowDirty = true;
   }
 
   setTheme(theme) {
@@ -137,6 +160,39 @@ export class Diorama extends Container {
     return styleOf(this.theme);
   }
 
+  // Show a new texture on a sprite and free the old one safely.
+  swapTexture(sprite, tex) {
+    const old = sprite.texture;
+    sprite.texture = tex;
+    if (old && old !== tex && old !== Texture.EMPTY) retire(() => old.destroy(true));
+  }
+
+  // A still tree as one texture: drawn once, so a quiet grove costs next to nothing per frame.
+  bakeStill() {
+    this.stillValid = true;
+    const b = this.treeInner.getLocalBounds();
+    if (b.width < 1 || b.height < 1) {
+      this.stillSprite.visible = false;
+      return;
+    }
+    const pad = 4;
+    const tex = this.app.renderer.generateTexture({
+      target: this.treeInner, resolution: Math.max(1, this.k * devicePixelRatio), antialias: true,
+      frame: new Rectangle(b.x - pad, b.y - pad, b.width + pad * 2, b.height + pad * 2),
+    });
+    this.swapTexture(this.stillSprite, tex);
+    this.stillSprite.position.set(b.x - pad, b.y - pad);
+  }
+
+  destroy(options) {
+    for (const p of this.particles) p.sp.destroy();
+    this.particles = [];
+    const textures = [this.backSprite.texture, this.stillSprite.texture, this.shadow.texture]
+      .filter((t) => t && t !== Texture.EMPTY);
+    super.destroy({ ...(typeof options === "object" ? options : {}), children: true });
+    retire(() => textures.forEach((t) => t.destroy(true)));
+  }
+
   // Leaf sprite scale for a texture, so every style's leaf covers the same ground.
   leafScale(texture, s) {
     const L = this.S.leaf;
@@ -146,16 +202,25 @@ export class Diorama extends Container {
 
   // --- static backdrop: wall, shelf, stand, pot (cached to a texture) ---
   buildBack() {
-    this.back.cacheAsTexture(false);
-    this.back.removeChildren().forEach((c) => c.destroy({ children: true }));
     this.backFx.removeChildren().forEach((c) => c.destroy());
     const S = this.S, t = this.theme, [x0, y0, x1, y1] = this.crop;
     (S.back || ((d) => d.dioramaBack()))(this);
     S.backFx?.(this);
-    this.back.cacheAsTexture({ resolution: Math.max(1, this.k * devicePixelRatio), antialias: true });
+    // bake the backdrop into one texture we own, then free the parts it was drawn from
+    const tex = this.app.renderer.generateTexture({
+      target: this.back, resolution: Math.max(1, this.k * devicePixelRatio), antialias: true,
+      frame: new Rectangle(x0, y0, x1 - x0, y1 - y0),
+    });
+    this.swapTexture(this.backSprite, tex);
+    this.backSprite.position.set(x0, y0);
+    const parts = this.back.removeChildren();
+    retire(() => parts.forEach((c) => c.destroy({ children: true })));
     this.filters = t.pixel ? [pixelateFilter(Math.max(2, Math.round(3 * this.k * devicePixelRatio)))] : null;
     this.sky.clear().rect(x0, y0, x1 - x0, y1 - y0).fill(0xffffff);
     this.sky.alpha = 0;
+    this.moon.removeChildren().forEach((c) => c.destroy());
+    (S.moon || ((d) => d.dioramaMoon()))(this, this.moon);
+    this.moon.position.set(x1 - 72, y0 + 52);
     const echo = S.woodEcho?.(this);
     this.woodEcho.visible = !!echo;
     if (echo) {
@@ -167,15 +232,20 @@ export class Diorama extends Container {
     if (!S.shadow) this.shadow.visible = false;
   }
 
+  // the Tk widget's moon: two soft halos, a pale disc, three craters
+  dioramaMoon() {
+    const m = new Graphics();
+    m.circle(0, 0, 26).fill({ color: 0xf0ecd6, alpha: 18 / 255 }).circle(0, 0, 19).fill({ color: 0xf0ecd6, alpha: 34 / 255 });
+    m.circle(0, 0, 12).fill({ color: 0xf0ecd6, alpha: 0.92 });
+    for (const [cx, cy, cr] of [[-4, -3, 2.6], [3, 4, 1.8], [5, -4, 1.3]]) m.circle(cx, cy, cr).fill({ color: 0xd6d0b8, alpha: 0.92 });
+    this.moon.addChild(m);
+  }
+
   // wall, shelf, wooden stand, a glazed pot with moss
   dioramaBack() {
     const t = this.theme, c = t.colors, [x0, y0, x1, y1] = this.crop;
     const g = new Graphics();
-    const wall = new FillGradient({
-      type: "linear", start: { x: 0, y: 0 }, end: { x: 0, y: 1 },
-      colorStops: [{ offset: 0, color: c.wall }, { offset: 1, color: c.wall2 }],
-    });
-    g.rect(x0, y0, x1 - x0, y1 - y0).fill(wall);
+    g.rect(x0, y0, x1 - x0, y1 - y0).fill(vgrad(c.wall, c.wall2));
     g.rect(x0, 452, x1 - x0, y1 - 452).fill(c.wall2);
     g.rect(x0, 452, x1 - x0, 1.5).fill(c.line);
     // stand: plank with a lit top edge, legs
@@ -203,11 +273,7 @@ export class Diorama extends Container {
     const p = new Graphics();
     p.rect(192, 430, 22, 8).fill(c.potDark);
     p.rect(386, 430, 22, 8).fill(c.potDark);
-    const body = new FillGradient({
-      type: "linear", start: { x: 0, y: 0 }, end: { x: 1, y: 0 },
-      colorStops: [{ offset: 0, color: c.potHi }, { offset: 0.3, color: c.pot }, { offset: 1, color: c.potDark }],
-    });
-    p.poly([172, 402, 428, 402, 412, 432, 188, 432]).fill(body);
+    p.poly([172, 402, 428, 402, 412, 432, 188, 432]).fill(potGradient(c));
     p.rect(180, 409, 240, 1.6).fill(shadeHex(c.pot, 1.18)); // a thrown ring around the body
     p.rect(166, 395, 268, 9).fill(c.potDark); // rim
     p.rect(168, 395.6, 264, 1.5).fill(shadeHex(c.potHi, 1.15));
@@ -396,26 +462,19 @@ export class Diorama extends Container {
       this.shadow.visible = false;
       return;
     }
+    // render the tree once through a blur and a to-black color matrix: no intermediate texture to free
     const res = Math.max(0.25, this.k * 0.6);
-    const src = r.generateTexture({ target: this.treeInner, resolution: res });
     const pad = 24;
-    const holder = new Container();
-    const sil = new Sprite(src);
-    sil.position.set(b.x, b.y);
-    sil.tint = this.theme.light ? 0x0c100e : 0x000000;
-    sil.filters = [new BlurFilter({ strength: 7 * res, quality: 3 })];
-    holder.addChild(sil);
+    const black = new ColorMatrixFilter();
+    black.brightness(0, false);
+    const kept = this.treeInner.filters;
+    this.treeInner.filters = [black, (this.shadowBlur ??= new BlurFilter({ strength: 7 * res, quality: 3 }))];
     const baked = r.generateTexture({
-      target: holder, resolution: res, frame: new Rectangle(b.x - pad, b.y - pad, b.width + pad * 2, b.height + pad * 2),
+      target: this.treeInner, resolution: res,
+      frame: new Rectangle(b.x - pad, b.y - pad, b.width + pad * 2, b.height + pad * 2),
     });
-    const old = this.shadow.texture;
-    this.shadow.texture = baked;
-    // free the old textures once this frame no longer has them bound
-    requestAnimationFrame(() => {
-      holder.destroy({ children: true });
-      src.destroy(true);
-      if (old && old !== baked && old !== Texture.EMPTY) old.destroy(true);
-    });
+    this.treeInner.filters = kept;
+    this.swapTexture(this.shadow, baked);
     this.shadow.position.set(b.x - pad + 10, b.y - pad + 7);
     this.shadow.alpha = this.theme.light ? 0.2 : 0.42;
     this.shadow.visible = true;
@@ -582,8 +641,8 @@ export class Diorama extends Container {
     const key = `${this.g.toFixed(3)}|${this.cc}|${this.theme.key}`;
     if (key !== this.builtKey) {
       this.builtKey = key;
-      if (this.treeRoot.isCachedAsTexture) this.treeRoot.cacheAsTexture(false);
       this.rebuild();
+      this.stillValid = false;
     }
     const now = performance.now();
     if (this.shadowDirty && now - this.shadowAt > 140) {
@@ -592,29 +651,30 @@ export class Diorama extends Container {
       this.bakeShadow();
     }
 
-    // wind: a breeze while Claude works, a whisper while it waits, still at night
-    const target = !ctx.ambient ? 0 : ctx.sleeping ? 0.08 : ctx.working ? 1 : 0.28;
+    // wind: a breeze while Claude works; still while it waits on you (an occasional leaf lets go)
+    const target = ctx.ambient && ctx.working ? 1 : 0;
     this.wind += (target - this.wind) * Math.min(1, dt / 900);
     const gust = 0.65 + 0.35 * Math.sin(t * 0.63) * Math.sin(t * 1.37 + 1.1);
     const w = this.wind * gust * this.S.wind;
-    this.S.animate?.(this, t, dt);
+    // a style's ambient backdrop (the aurora) drifts while the session works or you're looking
+    this.auroraOn = !!this.S.animate && ctx.ambient && (ctx.working || ctx.hovering);
+    if (this.auroraOn) this.S.animate(this, t, dt);
     // a still tree is baked into one texture until the wind picks up or it grows
     const still = target === 0 && this.wind < 0.004;
-    if (still !== this.still) {
-      this.still = still;
-      if (!still) this.treeRoot.cacheAsTexture(false);
+    if (still && (!this.still || !this.stillValid)) {
+      this.treeRoot.skew.x = 0;
+      for (const s of this.leafSprites) { s.x = s.bx; s.rotation = s.brot; }
+      for (const s of this.domeSprites) s.x = s.bx;
+      this.bakeStill();
     }
-    if (still) {
-      if (!this.treeRoot.isCachedAsTexture) {
-        this.treeRoot.skew.x = 0;
-        for (const s of this.leafSprites) { s.x = s.bx; s.rotation = s.brot; }
-        for (const s of this.domeSprites) s.x = s.bx;
-        this.treeRoot.cacheAsTexture({ resolution: Math.max(1, this.k * devicePixelRatio) });
-      }
-      this.shadow.skew.x = 0;
-    } else this.swayTree(t, w);
+    this.still = still;
+    this.treeRoot.visible = !still;
+    this.stillSprite.visible = still;
+    if (still) this.shadow.skew.x = 0;
+    else this.swayTree(t, w);
     this.updateShafts(ctx, dt, t);
     this.updateSky(ctx, dt);
+    this.updateMoon(ctx, dt);
     this.updateAmbient(ctx, dt);
     this.updateTools(ctx, dt, now);
     this.updateParticles(dt, now);
@@ -638,17 +698,28 @@ export class Diorama extends Container {
   }
 
   updateShafts(ctx, dt, t) {
-    // light shafts drift in while working by day
+    // light shafts drift in while working by day, and hold still otherwise
+    this.shaftsMoving = false;
     for (const s of this.shafts) {
-      const want = this.S.shafts && ctx.ambient && !ctx.night ? (ctx.working ? 0.07 : 0.035) : 0;
-      s.alpha += (want * (0.7 + 0.3 * Math.sin(t * 0.5 + s.ph)) - s.alpha) * Math.min(1, dt / 600);
+      const on = this.S.shafts && ctx.ambient && !ctx.night && ctx.working;
+      const want = on ? 0.07 * (0.7 + 0.3 * Math.sin(t * 0.5 + s.ph)) : 0;
+      if (Math.abs(want - s.alpha) > 0.002 || on) this.shaftsMoving = true;
+      s.alpha += (want - s.alpha) * Math.min(1, dt / 600);
       s.tint = hex(this.theme.colors.glow);
     }
+  }
+
+  updateMoon(ctx, dt) {
+    const want = ctx.night ? 1 : 0;
+    this.moonMoving = Math.abs(want - this.moon.alpha) > 0.01;
+    this.moon.alpha += (want - this.moon.alpha) * Math.min(1, dt / 1200);
+    this.moon.visible = this.moon.alpha > 0.01;
   }
 
   updateSky(ctx, dt) {
     // sky: the clock's tint over the scene, deeper when the session sleeps
     const sky = ctx.sky || { color: 0xffffff, alpha: 0 };
+    this.skyMoving = Math.abs(sky.alpha - this.skyTint.alpha) > 0.002;
     this.skyTint.alpha += (sky.alpha - this.skyTint.alpha) * Math.min(1, dt / 1500);
     this.skyTint.color = sky.color;
     this.sky.tint = this.skyTint.color;
@@ -824,8 +895,13 @@ export class Diorama extends Container {
     this.particles = keep;
   }
 
-  get moving() {
-    return !this.still || this.particles.length > 0;
+  // How much is moving, for the frame rate: 2 = sway or compaction, 1 = ambience only (fireflies, motes,
+  // the aurora, a sky or light fading), 0 = nothing, so nothing needs drawing.
+  get motion() {
+    if (!this.still || this.phase !== "idle" || this.particles.some((p) => p.kind !== "fly" && p.kind !== "mote")) return 2;
+    if (this.particles.length || this.auroraOn || this.skyMoving || this.shaftsMoving || this.moonMoving
+      || this.can.alpha > 0.01 || this.shears.alpha > 0.01) return 1;
+    return 0;
   }
 
   get busy() {

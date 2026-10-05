@@ -1,0 +1,7 @@
+{
+  "name": "context-bonsai",
+  "version": "0.2.0",
+  "description": "A living bonsai per Claude Code session: restores working state after compaction, signals the Context Bonsai desktop widget when a compaction starts, and ships a bonsai status line plus commands to set up and open the widget.",
+  "author": { "name": "KerbalTheGathering" },
+  "keywords": ["context", "compaction", "statusline", "widget", "windows"]
+}

@@ -1,0 +1,13 @@
+{
+  "name": "context-bonsai",
+  "owner": { "name": "KerbalTheGathering" },
+  "description": "Context Bonsai for Claude Code, installed from a local clone of this repository.",
+  "plugins": [
+    {
+      "name": "context-bonsai",
+      "source": "./plugin",
+      "description": "Restores working state after compaction, signals the Context Bonsai widget, bonsai status line, and widget commands.",
+      "version": "0.2.0"
+    }
+  ]
+}

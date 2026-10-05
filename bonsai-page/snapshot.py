@@ -12,7 +12,7 @@ import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-WIDGET = os.path.join(os.path.expanduser("~"), ".claude", "widget", "bonsai_widget.pyw")
+WIDGET = os.path.join(os.path.dirname(HERE), "widget", "bonsai_widget.pyw")  # the clone's widget, for its readers
 
 
 def load_widget():

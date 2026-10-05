@@ -82,7 +82,7 @@ class Card extends Container {
     this.scene.g = this.g;
     this.scene.world.x = -CROPS.grove[0] * this.scene.k + parallax * 6; // depth while the carousel moves
     const age = nowSec() - (s.mtime || 0); // each tree sways only while its own session works
-    this.scene.update({ ...ctx, working: age < 8, sleeping: age > 1800 });
+    this.scene.update({ ...ctx, working: age < 8, sleeping: age > 1800, night: ctx.night || age > 1800 });
     fit(this.pct, `${Math.round(this.g * 100)}%`);
     recolor(this.pct, col.ink);
     this.pct.position.set(CARD_W / 2 - this.pct.width / 2, this.pctY);
@@ -160,6 +160,16 @@ export class GroveView extends Container {
     });
   }
 
+  order() {
+    return this.ctrl.order;
+  }
+
+  get motion() {
+    let m = this.panelMoving ? 1 : 0;
+    for (const c of this.cards.values()) if (c.visible) m = Math.max(m, c.scene.motion);
+    return m;
+  }
+
   get n() {
     return this.ctrl.order.length;
   }
@@ -228,6 +238,7 @@ export class GroveView extends Container {
     const p = this.strip.toLocal(e.global);
     const i = Math.floor((p.x + GAP / 2) / (CARD_W + GAP));
     const path = this.ctrl.order[i];
+    if (!path) return;
     if (path) this.ctrl.openFocus(path, this.cards.get(path));
   }
 
@@ -248,7 +259,10 @@ export class GroveView extends Container {
         this.cards.set(p, card);
         this.strip.addChild(card);
       }
-      card.x = i * (CARD_W + GAP);
+      const x = i * (CARD_W + GAP);
+      if (card.slotX === undefined) card.x = x; // new cards start in place; moved ones slide to their new slot
+      else if (card.slotX !== x) tween(card, { x }, 450, { fn: ease.inOut });
+      card.slotX = x;
       card.layout(ctrl.sessions.get(p), ctrl.themeFor(ctrl.sessions.get(p)), this.zen);
     });
     this.target = clamp(this.target, 0, this.last);
@@ -324,7 +338,9 @@ export class GroveView extends Container {
 
   update(ctx) {
     const dt = Math.min(ctx.dt, 50) / 1000;
-    this.S?.animatePanel(this, performance.now() / 1000);
+    const anyWorking = this.order().some((p) => nowSec() - (this.ctrl.sessions.get(p)?.mtime || 0) < 8);
+    this.panelMoving = !!this.S?.animatesPanel && ctx.ambient && (anyWorking || ctx.hovering);
+    if (this.panelMoving) this.S.animatePanel(this, performance.now() / 1000);
     if (!this.drag) { // a critically damped spring toward the target card
       const k = 90, c = 2 * Math.sqrt(k);
       this.vel += (k * (this.target - this.scroll) - c * this.vel) * dt;

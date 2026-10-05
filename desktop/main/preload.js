@@ -4,6 +4,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("bonsai", {
   onState: (cb) => ipcRenderer.on("state", (_, s) => cb(s)),
   onCommand: (cb) => ipcRenderer.on("command", (_, c) => cb(c)),
+  onPause: (cb) => ipcRenderer.on("pause", (_, paused) => cb(paused)),
   ready: () => ipcRenderer.send("ready"),
   resize: (w, h) => ipcRenderer.send("resize", w, h),
   dragStart: () => ipcRenderer.send("drag-start"),
