@@ -72,7 +72,7 @@ Plus Auto (follows Windows light/dark mode and accent color) and Seasons (change
 - Drag to move. The card stays anchored at its bottom-right corner, and is always kept on a screen.
 - Double-click or Z toggles zen mode (just the trees).
 - Right-click for Start with Windows, Keep on top, Pin this session, Theme, View, Grove order, Zen mode, Ambient animation, Rescan sessions, Compact, Preview compact animation, and Quit.
-- Opening the shortcut again closes it.
+- Opening the shortcut again closes it, once it has been showing for a few seconds (a second click while it starts up just keeps it open).
 
 **CPU:** it draws only when something changes. Idle, it measured 0.5–3% of one CPU core.
 

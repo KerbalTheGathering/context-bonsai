@@ -56,6 +56,8 @@ let live = new Set(), liveAt = 0;
 let newest = null;
 let signalSeen = mtime(SIGNAL);
 let drag = null;
+let shownAt = 0; // when the window first appeared
+const TOGGLE_GRACE_MS = 4000;
 
 
 function loadConfig() {
@@ -229,7 +231,10 @@ ipcMain.on("ready", () => refresh());
 ipcMain.on("resize", (_, w, h) => {
   if (!win || drag) return;
   win.setBounds(placement(Math.ceil(w), Math.ceil(h)));
-  if (!win.isVisible()) win.showInactive();
+  if (!win.isVisible()) {
+    win.showInactive();
+    shownAt = Date.now();
+  }
 });
 
 ipcMain.on("drag-start", () => {
@@ -336,7 +341,12 @@ ipcMain.on("toggle-zen", () => {
 if (!app.requestSingleInstanceLock()) {
   app.quit(); // already running: launching again toggles it off
 } else {
-  app.on("second-instance", () => app.quit());
+  // Opening it again closes it, but only once it has been on screen a moment: a second click while it's
+  // still starting (a slow first launch, a double-click) would otherwise close it before it ever showed.
+  app.on("second-instance", () => {
+    if (win?.isVisible() && Date.now() - shownAt > TOGGLE_GRACE_MS) return app.quit();
+    if (win?.isVisible()) win.moveTop();
+  });
   app.whenReady().then(() => {
     createWindow();
     setupDev(app, win, { command, setZen: (on) => { cfg.zen = on; push(); }, setCfg: (k, v) => { cfg[k] = v; push(); }, loginItem });
