@@ -1,0 +1,20 @@
+﻿{
+  "name": "context-bonsai",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Context Bonsai desktop widget: a living bonsai per Claude Code session, rendered with PixiJS.",
+  "main": "main/main.js",
+  "scripts": {
+    "build": "esbuild src/app.js --bundle --format=esm --target=chrome120 --outfile=dist/app.js --sourcemap",
+    "watch": "npm run build -- --watch",
+    "start": "npm run build && electron .",
+    "dev": "npm run build && electron . --dev"
+  },
+  "dependencies": {
+    "pixi.js": "^8.22.0"
+  },
+  "devDependencies": {
+    "electron": "^44.5.1",
+    "esbuild": "^0.28.2"
+  }
+}

@@ -23,6 +23,7 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageTk
 
 HOME = os.path.expanduser("~")
 PROJECTS = os.path.join(HOME, ".claude", "projects")
+SESSIONS = os.path.join(HOME, ".claude", "sessions")  # Claude Code writes <pid>.json here for each open session
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG = os.path.join(HERE, "bonsai.json")
 SIGNAL = os.path.join(HERE, "signal.json")  # written by the PreCompact hook (precompact_signal.py)
@@ -42,7 +43,10 @@ CROP = (30, 0, 570, 462)  # part of the 600x480 mockup scene the widget shows
 GROVE_CROP = (70, 0, 530, 462)  # tighter crop for the small trees in the grove
 FOCUS_CROP = (30, -95, 570, 462)  # the card's scene: extra wall above the canopy for the % readout
 GROVE_MINUTES = 30  # sessions active within this window get a tree
-GROVE_MAX = 4
+GROVE_MAX = 12
+GROVE_PAGE = 4  # trees in view at once; the rest are a scroll of the carousel away
+GROVE_SLIDE = 0.35  # seconds for the carousel to slide
+LIVE_SECONDS = 15  # how often to re-read the open-session registry
 FONTS = "C:/Windows/Fonts/"
 
 # Each theme: panel/scene colors, plus leaf color stops (context fill, hue, saturation %, lightness %)
@@ -744,8 +748,8 @@ class Session:
             self._tree = build_tree(zlib.crc32(key.encode()), vary=True) if key else TREE
         return self._tree
 
-    def refresh(self):
-        """Returns True when the data changed."""
+    def refresh(self, git=True):
+        """Returns True when the data changed. git=False skips the branch/changes check (grove-only trees)."""
         path = self.pick()
         if not path:
             return False
@@ -765,7 +769,7 @@ class Session:
                 self.jobs = running_jobs(path)
             except Exception:
                 self.jobs = []
-        if self.cwd and time.time() - self.git_at > 10:
+        if git and self.cwd and time.time() - self.git_at > 10:
             self.git_at = time.time()
             self.git = git_state(self.cwd)
             changed = True
@@ -879,6 +883,43 @@ def git_state(cwd):
     return (br.strip() or "detached", len([l for l in st.splitlines() if l.strip()]))
 
 
+def process_alive(pid, started=None):
+    """True if pid is running and (when known) was started at FILETIME `started`, so a reused pid doesn't count."""
+    from ctypes import wintypes
+    k32 = ctypes.windll.kernel32
+    h = k32.OpenProcess(0x1000, False, int(pid))  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return False
+    try:
+        code = wintypes.DWORD()
+        if not k32.GetExitCodeProcess(h, ctypes.byref(code)) or code.value != 259:  # STILL_ACTIVE
+            return False
+        if started:
+            times = [wintypes.FILETIME() for _ in range(4)]
+            if k32.GetProcessTimes(h, *[ctypes.byref(t) for t in times]):
+                made = (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
+                return abs(made - int(started)) < 10_000_000  # within a second
+        return True
+    finally:
+        k32.CloseHandle(h)
+
+
+def open_transcripts():
+    """Transcripts of the Claude Code sessions that are open right now, from ~/.claude/sessions."""
+    found = []
+    for f in glob.glob(os.path.join(SESSIONS, "*.json")):
+        try:
+            with open(f, encoding="utf-8") as fh:
+                d = json.load(fh)
+            sid, pid = d.get("sessionId"), d.get("pid")
+            if not sid or not pid or not process_alive(pid, d.get("procStart")):
+                continue
+        except (OSError, ValueError, TypeError):
+            continue
+        found += glob.glob(os.path.join(PROJECTS, "*", glob.escape(sid) + ".jsonl"))[:1]
+    return found
+
+
 def stage_for(g):
     if g < 0.35:
         return "New growth", "ok", "plenty of room"
@@ -958,6 +999,10 @@ class Widget:
         self.follow = True  # focus follows the newest session until the user picks a tree
         self.resume_follow = False
         self.view = "focus"  # "focus" = one full card, "grove" = a tree per active session
+        self.grove_first = 0  # carousel: index of the first tree in view
+        self.grove_x = 0.0  # where the carousel is drawn, in trees (slides toward grove_first)
+        self.grove_slide = None  # (from, to, start time) while sliding
+        self.live, self.live_at = set(), 0  # transcripts of the sessions open right now, and when we last looked
         self._empty = Session(self.cfg, path="")
         self.grove_cache = {}
         self.chrome = self.cfg["theme"]
@@ -1021,12 +1066,14 @@ class Widget:
         self.label.bind("<Leave>", lambda e: self.set_inside(False))
         self.label.bind("<Double-Button-1>", self.toggle_zen)
         self.label.bind("<Button-3>", self.menu)
+        self.label.bind("<MouseWheel>", lambda e: self.scroll_grove(-1 if e.delta > 0 else 1))
         self.topvar = tk.BooleanVar(value=self.cfg["topmost"])
         self.pinvar = tk.BooleanVar(value=bool(self.cfg.get("pinned")))
         self.themevar = tk.StringVar(value=self.cfg["theme"] if self.cfg["theme"] in THEME_NAMES else "Moss")
         self.zenvar = tk.BooleanVar(value=bool(self.cfg.get("zen")))
         self.ambvar = tk.BooleanVar(value=self.cfg.get("ambient", True))
         self.projvar = tk.StringVar(value="")
+        self.viewvar = tk.StringVar(value=self.view)
 
         self.refresh_sessions()
         if len(self.order) > 1:
@@ -1051,16 +1098,37 @@ class Widget:
         return self.sessions.get(self.focus_path) or self._empty
 
     def active_paths(self):
-        """Transcripts touched in the last GROVE_MINUTES, newest first (the newest overall if none)."""
+        """Open sessions and transcripts touched in the last GROVE_MINUTES, newest first
+        (the newest overall if none)."""
         now, found = time.time(), []
+        if now - self.live_at > LIVE_SECONDS:
+            self.live_at = now
+            try:
+                self.live = {os.path.normcase(p) for p in open_transcripts()}
+            except Exception:
+                self.live = set()
         for p in glob.glob(os.path.join(PROJECTS, "*", "*.jsonl")):
             try:
                 found.append((os.path.getmtime(p), p))
             except OSError:
                 pass
         found.sort(reverse=True)
-        recent = [p for m, p in found if now - m < GROVE_MINUTES * 60][:GROVE_MAX]
-        return recent or [p for _, p in found[:1]]
+        active = [p for m, p in found if now - m < GROVE_MINUTES * 60 or os.path.normcase(p) in self.live]
+        return active[:GROVE_MAX] or [p for _, p in found[:1]]
+
+    def rescan(self):
+        """Look for open sessions again and re-read every transcript's stats from the start."""
+        self.live_at = 0
+        self.sessions.clear()
+        self.grove_cache, self.sway_cache, self.tree_key = {}, {}, None
+        self.refresh_sessions()
+        self.g = self.session.g
+        self.tween = None
+        n = len(self.order)
+        self.caption = (f"Found {n} {plural(n, 'active session')}.", "muted", time.time() + 6)
+        if self.view == "grove" and n <= 1:
+            self.view = "focus"
+        self.draw()
 
     def refresh_sessions(self):
         paths = self.active_paths()
@@ -1076,11 +1144,11 @@ class Widget:
             s = self.sessions.get(p)
             if s is None:
                 s = self.sessions[p] = Session(self.cfg, p)
-                s.refresh()
+                s.refresh(git=p == focus)
                 s.seen_cc, s.seen_restores = s.compactions, s.restores
             else:
                 s.g_before = s.g
-                s.refresh()
+                s.refresh(git=p == focus)
         for p in list(self.sessions):
             if p not in paths:
                 del self.sessions[p]
@@ -1446,6 +1514,13 @@ class Widget:
                 p["life"] -= dt / 1100
         self.particles = [p for p in self.particles if p["life"] > 0]
         can_out = self.phase == "watering" or now - self.can_at < 3.2
+        if self.grove_slide:
+            frm, to, t0 = self.grove_slide
+            t = clamp((now - t0) / GROVE_SLIDE, 0, 1)
+            self.grove_x = lerp(frm, to, 1 - (1 - t) ** 3)
+            if t >= 1:
+                self.grove_slide = None
+            active = True
         busy = active or self.particles or can_out
         if busy or ambient_moving:
             self.draw(scene_only=not busy)
@@ -1665,6 +1740,44 @@ class Widget:
                                self.root.winfo_screenheight() - round(72 * self.f))
         self.root.geometry(f"+{int(self.anchor[0] - w)}+{int(self.anchor[1] - h)}")
 
+    def grove_per(self):
+        return min(len(self.order), GROVE_PAGE)
+
+    def grove_clamp(self):
+        """Keep the carousel in range after sessions come and go."""
+        last = max(0, len(self.order) - self.grove_per())
+        if self.grove_first > last:
+            self.grove_first = last
+        if not self.grove_slide:
+            self.grove_x = float(self.grove_first)
+
+    def grove_go(self, first, animate=True):
+        first = clamp(first, 0, max(0, len(self.order) - self.grove_per()))
+        if first == self.grove_first:
+            return
+        self.grove_first = first
+        if animate:
+            self.grove_slide = (self.grove_x, float(first), time.time())
+        else:
+            self.grove_slide, self.grove_x = None, float(first)
+        self.hover_key = None
+        self.draw()
+
+    def scroll_grove(self, step):
+        """A page left or right, wrapping around at either end."""
+        if self.view != "grove" or len(self.order) <= GROVE_PAGE:
+            return
+        per, last = self.grove_per(), len(self.order) - self.grove_per()
+        if step > 0:
+            self.grove_go(0 if self.grove_first >= last else self.grove_first + per)
+        else:
+            self.grove_go(last if self.grove_first <= 0 else self.grove_first - per)
+
+    def grove_page(self):
+        """(current page, page count) for the carousel dots."""
+        per = self.grove_per()
+        return math.ceil(self.grove_first / per), math.ceil(len(self.order) / per)
+
     def grove_tree(self, s, width):
         """One grove tree in its session's theme (cached), leaving the frame's theme applied afterwards."""
         set_theme(self.theme_for(s))
@@ -1677,13 +1790,16 @@ class Widget:
         return cached[1]
 
     def render_grove(self):
+        """A carousel of trees, GROVE_PAGE at a time: arrows in the header, page dots below, or scroll the wheel."""
         f, F, pad = self.f, self.fonts, self.pad
         now = time.time()
+        self.grove_clamp()
         paths = self.order
-        n = max(1, len(paths))
+        n, per = len(paths), max(1, self.grove_per())
+        paged = n > per
         gap = 10 * f
-        W = max(self.W, round(2 * pad + n * 104 * f + (n - 1) * gap))
-        cell = (W - 2 * pad - (n - 1) * gap) / n
+        W = max(self.W, round(2 * pad + per * 104 * f + (per - 1) * gap))
+        cell = (W - 2 * pad - (per - 1) * gap) / per
         scene = self.get_scene("grove", int(cell))
         info_h = 8 * f + 16 * f + 14 * f + 22 * f + 10 * f + 14 * f  # title, project, %, meter, status
         H = round(pad + 30 * f + scene.h + info_h + 22 * f + pad)
@@ -1691,15 +1807,39 @@ class Widget:
         d = ImageDraw.Draw(img)
         d.rectangle([0, 0, W - 1, H - 1], outline=C["line"])
         d.text((pad, pad), "Grove", font=F["title"], fill=C["ink"])
-        count = f"{len(paths)} active"
-        d.text((W - pad - d.textlength(count, font=F["mono"]), pad + 4 * f), count, font=F["mono"], fill=C["muted"])
+        if paged:
+            first = round(self.grove_x)
+            count = f"{first + 1}–{min(n, first + per)} of {n}"
+            xr = W - pad
+            for arrow, step in (("›", 1), ("‹", -1)):
+                bw_ = d.textlength(arrow, font=F["title"]) + 12 * f
+                rect = (xr - bw_, pad - 3 * f, xr, pad + 19 * f)
+                hovered = self.hover_key == ("scroll", step)
+                if hovered:
+                    d.rounded_rectangle(rect, radius=6 * f, fill=C["line"])
+                d.text((xr - bw_ + 6 * f, pad - 2 * f), arrow, font=F["title"], fill=C["ink"] if hovered else C["muted"])
+                self.hits.append((rect, "scroll", step))
+                xr -= bw_ + 2 * f
+                if step == 1:
+                    xr -= d.textlength(count, font=F["mono"]) + 6 * f
+                    d.text((xr + 3 * f, pad + 4 * f), count, font=F["mono"], fill=C["muted"])
+        else:
+            count = f"{n} active"
+            d.text((W - pad - d.textlength(count, font=F["mono"]), pad + 4 * f), count, font=F["mono"], fill=C["muted"])
         y0 = pad + 30 * f
+        # the trees go on their own layer, clipped to the viewport, so they slide in and out at its edges
+        vx0, vx1 = round(pad - 6 * f), round(W - pad + 6 * f)
+        layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        main, img, d = (img, d), layer, ImageDraw.Draw(layer)
         for i, p in enumerate(paths):
+            x = pad + (i - self.grove_x) * (cell + gap)
+            if x + cell + 5 * f < vx0 or x - 5 * f > vx1:
+                continue
             s = self.sessions[p]
             g = s.g
-            x = pad + i * (cell + gap)
             rect = (x - 5 * f, y0 - 5 * f, x + cell + 5 * f, y0 + scene.h + info_h)
-            self.hits.append((rect, "open", p))
+            if not self.grove_slide and rect[0] >= vx0 - 1 and rect[2] <= vx1 + 1:
+                self.hits.append((rect, "open", p))
             if self.hover_key == ("open", p):
                 d.rounded_rectangle(rect, radius=8 * f, fill=C["line"])
             t = self.grove_tree(s, int(cell))
@@ -1724,8 +1864,23 @@ class Widget:
             status = fmt_ago(now - s.mtime if s.mtime else 9e9)
             d.text((cx - d.textlength(status, font=F["mono"]) / 2, yy), status, font=F["mono"],
                    fill=C["ok"] if status == "live" else C["muted"])
-        hint = "Click a tree to open it"
-        d.text(((W - d.textlength(hint, font=F["small"])) / 2, H - pad - 14 * f), hint, font=F["small"], fill=C["muted"])
+        (img, d), layer = main, layer.crop((vx0, 0, vx1, H))
+        img.alpha_composite(layer, (vx0, 0))
+        if paged:  # page dots, each one jumps to its page
+            page, pages = self.grove_page()
+            r, step = 3.5 * f, 16 * f
+            cy = H - pad - 7 * f
+            x = (W - (pages - 1) * step) / 2
+            for k in range(pages):
+                hovered = self.hover_key == ("grove_page", k)
+                fill = C["ink"] if k == page else (C["muted"] if hovered else C["line"])
+                d.ellipse([x - r, cy - r, x + r, cy + r], fill=fill)
+                self.hits.append(((x - step / 2, cy - 9 * f, x + step / 2, cy + 9 * f), "grove_page", k))
+                x += step
+        else:
+            hint = "Click a tree to open it"
+            d.text(((W - d.textlength(hint, font=F["small"])) / 2, H - pad - 14 * f), hint, font=F["small"],
+                   fill=C["muted"])
         return img
 
     def render_zen(self):
@@ -1733,18 +1888,35 @@ class Widget:
         f, F = self.f, self.fonts
         m = round(6 * f)
         if self.view == "grove" and len(self.order) > 1:
+            self.grove_clamp()
             cell = int(110 * f)
-            scene, n = self.get_scene("grove", cell), len(self.order)
-            img = Image.new("RGBA", (2 * m + n * cell + (n - 1) * m, 2 * m + scene.h), C["panel"])
-            d = ImageDraw.Draw(img)
+            scene, n, per = self.get_scene("grove", cell), len(self.order), self.grove_per()
+            W = 2 * m + per * cell + (per - 1) * m
+            img = Image.new("RGBA", (W, 2 * m + scene.h), C["panel"])
+            strip = Image.new("RGBA", (W - 2 * m, scene.h), (0, 0, 0, 0))  # clips trees sliding past the edges
             for i, p in enumerate(self.order):
-                s = self.sessions[p]
-                t = self.grove_tree(s, cell)
-                x = m + i * (cell + m)
-                img.paste(t, (x, m), t)
+                x = round((i - self.grove_x) * (cell + m))
+                if -cell < x < strip.width:
+                    t = self.grove_tree(self.sessions[p], cell)
+                    strip.paste(t, (x, 0), t)
+            img.alpha_composite(strip, (m, m))
+            d = ImageDraw.Draw(img)
+            for i, p in enumerate(self.order[self.grove_first:self.grove_first + per]):
+                s, x = self.sessions[p], m + i * (cell + m)
+                if self.grove_slide:
+                    continue
                 self.hits.append(((x, m, x + cell, m + scene.h), "open", p))
                 if self.hover_key == ("open", p):
                     self.tag(d, x + 5 * f, m + 5 * f, f"{round(s.g * 100)}% · {s.title or s.name}", cell - 10 * f)
+            if n > per and self.inside:  # small arrows at the edges while hovered; the wheel scrolls too
+                for step, x in ((-1, m + 4 * f), (1, W - m - 26 * f)):
+                    rect = (x, m + scene.h / 2 - 11 * f, x + 22 * f, m + scene.h / 2 + 11 * f)
+                    hovered = self.hover_key == ("scroll", step)
+                    d.rounded_rectangle(rect, radius=11 * f, fill=C["line"] if hovered else C["panel"], outline=C["line"])
+                    arrow = "‹" if step < 0 else "›"
+                    d.text((rect[0] + (22 * f - d.textlength(arrow, font=F["title"])) / 2, rect[1] - 1 * f), arrow,
+                           font=F["title"], fill=C["ink"])
+                    self.hits.append((rect, "scroll", step))
         else:
             tree = self.tree().copy()
             tree.alpha_composite(self.overlay(tree.size))
@@ -2051,6 +2223,15 @@ class Widget:
         elif action == "grove":
             self.view = "grove"
             self.follow = True
+            if self.focus_path in self.order:  # open on the page with the tree you were looking at
+                self.grove_go(self.order.index(self.focus_path) // self.grove_per() * self.grove_per(),
+                              animate=False)
+        elif action == "scroll":
+            self.scroll_grove(arg)
+            return
+        elif action == "grove_page":
+            self.grove_go(arg * self.grove_per())
+            return
         elif action == "page":
             self.cfg["page"] = arg
             save_config(self.cfg)
@@ -2095,10 +2276,18 @@ class Widget:
             for name in THEME_NAMES:
                 proj.add_radiobutton(label=name, value=name, variable=self.projvar, command=self.change_project_theme)
             m.add_cascade(label=f"Theme for {ellipsize_plain(s.name, 28)}", menu=proj)
+        views = tk.Menu(m, tearoff=0)
+        self.viewvar.set(self.view)
+        views.add_radiobutton(label="Focus (one session)", value="focus", variable=self.viewvar,
+                              command=self.change_view)
+        several = len(self.order) > 1
+        views.add_radiobutton(label="Grove (every active session)" if several else "Grove (only one session active)",
+                              value="grove", variable=self.viewvar, command=self.change_view,
+                              state="normal" if several else "disabled")
+        m.add_cascade(label="View", menu=views)
         m.add_checkbutton(label="Zen mode", variable=self.zenvar, command=self.toggle_zen)
         m.add_checkbutton(label="Ambient animation", variable=self.ambvar, command=self.toggle_ambient)
-        if len(self.order) > 1 and self.view == "focus":
-            m.add_command(label="Show grove", command=lambda: self.do("grove", None))
+        m.add_command(label="Rescan sessions", command=self.rescan)
         if self.view == "focus" and self.phase in ("idle", "armed"):
             m.add_command(label="Cancel compact" if self.phase == "armed" else "Compact",
                           command=lambda: self.do("compact", None))
@@ -2106,6 +2295,12 @@ class Widget:
         m.add_command(label="Preview compact animation", command=self.run_preview)
         m.add_command(label="Quit", command=self.root.destroy)
         m.tk_popup(e.x_root, e.y_root)
+
+    def change_view(self):
+        if self.viewvar.get() == "grove":
+            self.do("grove", None)
+        elif self.view != "focus":
+            self.do("open", self.focus_path)
 
     def toggle_top(self):
         self.cfg["topmost"] = self.topvar.get()
